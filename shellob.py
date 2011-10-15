@@ -10,85 +10,149 @@ shellob.py
    /   oOOo   \
        <  >
     
-A simple webcrawler.
-
-Set up a mongodb server, and have different instances of this program running.
-Each program will recursively fetch as many urls as it can, upto the python stack limit (1000 at a time)
-
+A slightly simple webcrawler.
     
 """
-__version__ = "0.0.2"
-__author__ = "maldy (lordmaldy at gmail dot com), darthshak (darthshak at gmail dot com)"
+__version__ = "0.5"
+__authors__ = "maldy (lordmaldy at gmail dot com), Vishaka (vishakadatta at\
+gmail dot com)"
 
 import re
-import datetime
+
+import socket
+import time
+import errno
 
 # stuff you'll have to install - all available with python setuptools
-import mechanize				# a browser emulator and screen scraper
-import pymongo					# mongo client
-import eventlet					# for thread concurrency
+from mechanize import Browser, HTTPError, URLError, BrowserStateError
+import pymongo
 
-mongod_host = '10.42.43.10'			# our mongodb server
-mongod_port = 27017
-espn_regex = re.compile(r'/football/')		# make sure to crawl only espnstar.com/football pages (includes subdomains like beta.espnstar.com)
-fixtures_regex = re.compile(r'/fixtures/')	# the fixtures pages are crawler traps - avoid
 
-# check if current url has already been crawled before
-def seen(url, connection=None):
-	if connection is None:
-		connection = pymongo.Connection(mongod_host, mongod_port)
-	db = connection.espn_corpus
-	seen = db.pages.find_one({'url':url},{'url':1})
-	if seen:
-		return True
-	return False
+espn_regex = re.compile(r'/football/')
+fixture_regex = re.compile(r'/fixtures/')
 
-# fetch recursively
-def fetch(url, pool):
-	print "fetching " + url + "... "
-	br = mechanize.Browser()	# automatically respects the Robot Exclusion Policy (robots.txt)
-	with eventlet.Timeout(5, False):
-		try:
-			response = br.open(url)
-			connection = pymongo.Connection(mongod_host, mongod_port)
-			db = connection.espn_corpus
-			html = response.read()
-			post = {"url": url, "crawl_time": datetime.datetime.utcnow(), "content": html}
-			posts = db.pages
-			posts.update({"url": url},post, True)
- 			
-		except Exception:
-			raise
+PORT = 10000
+URL_TIMEOUT = 60		#Time-out to wait for page to load
+
+class Crawler():
+
+	def __init__(self):
+		self.br = Browser()
+		self.br.set_handle_redirect(True)
+		self.queue_server = {"host": "localhost", "port": PORT}
+		self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)	
+		self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+		try: 
+			self.sock.connect((self.queue_server['host'], self.queue_server['port']))
+		except socket.error, (value, message):
+			print "Could not connect to queue server at " + self.queue_server['host'] +\
+					":" + str(self.queue_server['port'])
+			print message
+			return
+
+	def recv_delim(self, buf_len, delim):
+		data = ""
+		while True:
+			recv_data = self.sock.recv(buf_len)
+			data += recv_data
+			if delim in data:
+				return data[:-1]
+
+	def send_msg(self, msg, delim):
+		msg_len = len(msg)
+		bytes_sent = 0
+
+		while bytes_sent < msg_len:
+			sent = self.sock.send( msg + delim )
+			bytes_sent += sent
+			msg = msg[sent+1:]
+
+		return bytes_sent 
+
+	def crawl(self):
+
+		while True:
+			# grab the next url off the queue server
+			buf_left = 10000 
+
+			url_msg = self.recv_delim( 4096, '\0')
+			depth_end = url_msg.find('\1')
+
+			url = url_msg[depth_end+1:]
+			depth = int(url_msg[0:depth_end])
+	
+			print str(time.ctime()) + " URL received from queue server ->" + url +\
+			" Depth : " + str(depth)
 			
-	links = br.links()
-	for link in links:
-		if espn_regex.search(link.absolute_url) and not fixtures_regex.search(link.absolute_url) and not seen(link.absolute_url):
-			print url + " -> " + link.absolute_url
-			url_post = {"url": link.absolute_url}
-			url_posts = db.seen_urls
-			url_posts.update({'url':link.absolute_url},url_post, True)
-			connection.disconnect()			
-			pool.spawn_n(fetch, link.absolute_url, pool)
+			# fetch url contents (filter stuff here)
+			try : 
+				response = self.br.open(url,timeout=URL_TIMEOUT)
 
-# 'pool' is our non-blocking concurrent event manager
-def crawl(start_url):
-	pool = eventlet.GreenPool()
-	try:
-		fetch(start_url, pool)
-	except Exception, e:
-		print "Exception raised: %s" %e
-	pool.waitall()
-	return
+				if response:
+					print "Crawl successful"
+					crawler_ack = 's'
+				else:
+					print "Crawl failed - Timeout"
+					crawler_ack = 'f'
+			except HTTPError, e: 
+				print "Crawl failed - HTTP error"
+				if e.code >= 400 and e.code<= 417:
+					crawler_ack = 'd'
+				else:
+					crawler_ack = 'f'
+			except URLError:
+				print "Crawl failed - Could not open page"
+				crawler_ack = 'f'
+					
+			links_found = []
+			if crawler_ack is 's':
+				try:
+					links_found = list( self.br.links() )
+				except BrowserStateError:
+					print "Crawl failed - Mechanize error"
+					crawler_ack = 'd'
+				except socket.timeout:
+					print "Crawl failed - links() timed out"
+					crawler_ack = 'f'
+
+			crawler_msg = crawler_ack + "*"
+
+			for link in links_found:
+				if espn_regex.search(link.absolute_url) and not \
+						fixture_regex.search(link.absolute_url):
+					
+					depth = link.absolute_url.count('/') - 4 
+					if link.absolute_url[-1] is not '/':
+						depth += 1
+						link.absolute_url += '/'
+
+					url_msg = str(depth) + '\1' + link.absolute_url + '*'
+					crawler_msg += url_msg
 		
+			bytes_sent = self.send_msg( crawler_msg, '\0' )
+
+		self.sock.close()
+	
 def main():
-	# provide a seed url list / queue unleash shellob onto the unsuspecting site.
-	# provide a different seed list for different crawler instances to have them work in parallel.
-
-	crawled_list = ["http://www.espnstar.com/football/"]
-
-	for link in crawled_list:
-		link = link.strip().encode("utf-8")
-		crawl(link)
-
+	# thread and unleash shellob onto the unsuspecting site. Amok!
+	c = Crawler()
+	c.crawl()
+	
 if __name__ == "__main__":
 	main()
+
+
+##############################
+# Code Snippet dump - ignore #
+##############################
+"""
+		response = self.br.open(url)
+		for link in self.br.links():
+			print link
+		response.seek(0)
+		html = response.read()
+		root = lxml.html.fromstring(html)
+		for link in root.iterlinks():
+			print link
+"""

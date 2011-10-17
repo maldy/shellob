@@ -2,7 +2,8 @@
 
 import socket, time, threading
 import Queue
-from errno import ETIMEDOUT
+from pygraph.classes.graph import graph
+from pygraph.readwrite.markup import write
 
 REVISIT_TIMEOUT = 900		#Time-out (in seconds) to reattempt a failed crawl.
 CRAWLER_TIMEOUT = 60 	#Time-out after which crawler is assumed dead.
@@ -106,83 +107,97 @@ class ClientHandler():
 			self.print_log( log_msg )
 			grand_list.remove( url )
 
+	#Gets next URL to be crawled.
+	#Returns (depth, url, url_type) where,
+	#depth -> Depth of URL in the BFS tree.
+	#url -> URL to be crawled.
+	#url_type -> Can be "failed" if there was a failed crawl on this URL before
+	#or can be "roster" if it is a new unvisted URL.
+	def get_next_url(self):
+		url = ""
+
+		#We first check if we can re-attempt any of the failed crawls.
+		#We preferentially pick out those crawls that failed at the least depth.
+		#Only those crawls that failed more than REVISIT_TIMEOUT seconds ago
+		#are reattempted. 
+		#'depth' - Depth of the URL sent to the crawler.	
+		#'url' - URL sent to the crawler.
+		if self.crawler_timed_out is False:
+			url = ""
+			depth = 0
+
+			try:
+				failed_url_info = failed_queue.get_nowait()
+
+				timestamp = failed_url_info[1]
+				if time.time() - timestamp > REVISIT_TIMEOUT:
+					depth = failed_url_info[0]
+					url = failed_url_info[2]
+					url_type = "failed"
+				else:
+					failed_queue.put(failed_url_info)
+			
+			except Queue.Empty:
+				pass
+
+				#In case the chosen failed crawl is too recent, we put it 
+				#back on the failed queue.
+				#We choose from the roster queue instead.
+				try:  
+					url_info = roster_queue.get_nowait()
+					depth, url = url_info
+					url_type = "roster"
+				except Queue.Empty:
+					pass
+
+		return (url, depth, url_type)
+	
 	def start(self):
 		self.print_log( "--------------------------" )
 		self.print_log( "New connection accepted" )
 
 		while True:
-			depth = 0
-			url = ""
 
-			#We first check if we can re-attempt any of the failed crawls.
-			#We preferentially pick out those crawls that failed at the least depth.
-			#Only those crawls that failed more than REVISIT_TIMEOUT seconds ago
-			#are reattempted. 
-			#'depth' - Depth of the URL sent to the crawler.	
-			#'url' - URL sent to the crawler.
-			if self.crawler_timed_out is False:
-				try:
-					failed_url_info = failed_queue.get_nowait()
-	
-					timestamp = failed_url_info[1]
-					if time.time() - timestamp > REVISIT_TIMEOUT:
-						depth = failed_url_info[0]
-						url = failed_url_info[2]
-						url_type = "failed"
-					else:
-						failed_queue.put(failed_url_info)
-				
-				except Queue.Empty:
-					pass
-	
-					#In case the chosen failed crawl is too recent, we put it 
-					#back on the failed queue.
-					#We choose from the roster queue instead.
-					try:  
-						url_info = roster_queue.get_nowait()
-						depth, url = url_info
-						url_type = "roster"
-					except Queue.Empty:
-						pass
-	
-				#If the url field is empty, it means there is nothing new left to crawl.
-				#Crawling is complete!
-				#Else, we have to crawl.
-				if url:
-					log_msg = "Asking crawler " + str(self.client_id) +\
+			url, depth, url_type = self.get_next_url()
+
+			#If the url field is empty, it means there is nothing new left to crawl.
+			#Crawling is complete!
+			#Else, we have to crawl.
+			if url:
+				log_msg = "Asking crawler " + str(self.client_id) +\
 							" to visit " + url + " at depth " + str(depth)
 	
-					self.print_log( log_msg )
-					print time.ctime() + " " + log_msg
-	
-					#Depth is packaged along with link. It's easier to ask crawler to
-					#increment the depth than ask queue server to keep track of current depth.
-					#Message format is : | Depth | \1 | URL | \0 |
-	
-					url_msg = str(int(depth)) + '\1' + url
+				self.print_log( log_msg )
+				print time.ctime() + " " + log_msg
+
+				#Depth is packaged along with link. It's easier to ask crawler to
+				#increment the depth than ask queue server to keep track of current depth.
+				#Message format is : | Depth | \1 | URL | \0 |
+
+				url_msg = str(int(depth)) + '\1' + url
 		
-					try:
-						#Attempt to reconnect if the crawler has timed out.
-						bytes_sent = self.send_msg(url_msg, '\0')
-					except socket.timeout:
-						log_msg = " " + url + " (Crawler timed out)"
-						self.crawler_timed_out = True
-						self.handle_socket_error( (depth, time.time(), url), url_type ) 
-						self.n_timeouts += 1
+				try:
+					#Attempt to reconnect if the crawler has timed out.
+					bytes_sent = self.send_msg(url_msg, '\0')
+				except socket.timeout:
+					log_msg = " " + url + " (Crawler timed out)"
+					self.crawler_timed_out = True
+					self.handle_socket_error( (depth, time.time(), url), url_type ) 
+					self.n_timeouts += 1
 
-						print time.ctime() + " " + log_msg
-						self.print_log( log_msg )
+					print time.ctime() + " " + log_msg
+					self.print_log( log_msg )
 
-					except socket.error, e:
-						value, message = e
-						self.handle_socket_error( (depth, time.time(), url), url_type ) 
+				except socket.error, e:
+					value, message = e
+					self.handle_socket_error( (depth, time.time(), url), url_type ) 
 
-						print time.ctime() + " " + log_msg
-						self.print_log( log_msg )
+					print time.ctime() + " " + log_msg
+					self.print_log( log_msg )
 
-				else:
-					print "Out of URLs. Completed crawling!"
-					break
+			else:
+				print "Out of URLs. Completed crawling!"
+				break
 	
 			#We block on the response from the crawler.
 			#The first 1 byte of the response is an ack from the crawler.
@@ -211,7 +226,7 @@ class ClientHandler():
 				if self.n_timeouts == MAX_TIMEOUTS:
 					self.handle_socket_error( (depth, time.time(), url), url_type ) 
 					log_msg = " Maximum number of time outs reached. Terminating"\
-										+ " connection."
+									+ " connection."
 					print time.ctime() + " " + log_msg
 					self.print_log( log_msg )
 					break
@@ -231,17 +246,17 @@ class ClientHandler():
 
 			self.handle_ack( ack, depth, url, url_type )
 			msgs = msgs[1:]
-				
+			
 			for msg in msgs:
 				if msg:
 					try:
 						depth_end = msg.index('\1')
 						depth = int(msg[:depth_end])
 						url = msg[depth_end+1:]
-
+	
 						if url.strip() not in grand_list:
 							grand_list.add( url )
-
+	
 						if url.strip() not in visited_list and \
 						 	 url.strip() not in roster_list:
 							roster_queue.put( (depth, url), True )
@@ -249,11 +264,11 @@ class ClientHandler():
 					except ValueError:
 						log_msg = "Badly formed message from crawler" + str(self.client_id) +\
 											"No depth information present" 
-
+	
 						self.print_log( log_msg )
 						print log_msg + "\n"
 						pass
-				
+			
 		self.print_log( "Connection terminated\n" )
 		print "Connection terminated"
 		self.client.close()

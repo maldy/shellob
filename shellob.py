@@ -117,14 +117,13 @@ class Crawler():
 					crawler_ack = 'f'
 
 			crawler_msg = crawler_ack + "*"
+			depth += 1	#All links in this page are at lower depth.
 
 			for link in links_found:
 				if espn_regex.search(link.absolute_url) and not \
 						fixture_regex.search(link.absolute_url):
 					
-					depth = link.absolute_url.count('/') - 4 
 					if link.absolute_url[-1] is not '/':
-						depth += 1
 						link.absolute_url += '/'
 
 					url_msg = str(depth) + '\1' + link.absolute_url + '*'

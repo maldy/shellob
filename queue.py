@@ -125,6 +125,7 @@ class ClientHandler():
 		if self.crawler_timed_out is False:
 			url = ""
 			depth = 0
+			url_type = ""
 
 			try:
 				failed_url_info = failed_queue.get_nowait()
@@ -151,14 +152,48 @@ class ClientHandler():
 					pass
 
 		return (url, depth, url_type)
-	
+
+	#Parse response from crawler. Takes depth, url, url_type arguments for
+	#the sake of handling the ack message too.
+	def parse_crawler_messages(self, response, depth, url, url_type):
+		print response
+		msgs = response.split("*")
+		ack = msgs[0]
+
+		self.handle_ack( ack, depth, url, url_type )
+		msgs = msgs[1:]
+		
+		for msg in msgs:
+			if msg:
+				try:
+					depth_end = msg.index('\1')
+					depth = int(msg[:depth_end])
+					url = msg[depth_end+1:]
+
+					if url.strip() not in grand_list:
+						grand_list.add( url )
+
+					if url.strip() not in visited_list and \
+					 	 url.strip() not in roster_list:
+						roster_queue.put( (depth, url), True )
+						roster_list.add( url )
+
+				except ValueError:
+					log_msg = "Badly formed message from crawler" + str(self.client_id) +\
+										"No depth information present" 
+
+					self.print_log( log_msg )
+					print log_msg + "\n"
+					pass
+
 	def start(self):
 		self.print_log( "--------------------------" )
 		self.print_log( "New connection accepted" )
 
 		while True:
 
-			url, depth, url_type = self.get_next_url()
+			url_info = self.get_next_url()
+			depth, url, url_type = url_info
 
 			#If the url field is empty, it means there is nothing new left to crawl.
 			#Crawling is complete!
@@ -221,8 +256,6 @@ class ClientHandler():
 					print time.ctime() + " " + log_msg
 					self.print_log( log_msg )
 
-				print "Number of timeouts " + str(self.n_timeouts)
-	
 				if self.n_timeouts == MAX_TIMEOUTS:
 					self.handle_socket_error( (depth, time.time(), url), url_type ) 
 					log_msg = " Maximum number of time outs reached. Terminating"\
@@ -231,8 +264,6 @@ class ClientHandler():
 					self.print_log( log_msg )
 					break
 
-				continue
-
 			except socket.error, e:
 				value, message = e
 				self.handle_socket_error( (depth, time.time(), url), url_type ) 
@@ -240,35 +271,9 @@ class ClientHandler():
 				print time.ctime() + " " + log_msg
 				self.print_log( log_msg )
 				continue
+	
+			self.parse_crawler_messages( crawler_response, depth, url, url_type )
 
-			msgs = crawler_response.split("*")
-			ack = msgs[0]
-
-			self.handle_ack( ack, depth, url, url_type )
-			msgs = msgs[1:]
-			
-			for msg in msgs:
-				if msg:
-					try:
-						depth_end = msg.index('\1')
-						depth = int(msg[:depth_end])
-						url = msg[depth_end+1:]
-	
-						if url.strip() not in grand_list:
-							grand_list.add( url )
-	
-						if url.strip() not in visited_list and \
-						 	 url.strip() not in roster_list:
-							roster_queue.put( (depth, url), True )
-							roster_list.add( url )
-					except ValueError:
-						log_msg = "Badly formed message from crawler" + str(self.client_id) +\
-											"No depth information present" 
-	
-						self.print_log( log_msg )
-						print log_msg + "\n"
-						pass
-			
 		self.print_log( "Connection terminated\n" )
 		print "Connection terminated"
 		self.client.close()

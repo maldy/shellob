@@ -30,12 +30,11 @@ import pymongo
 mongo_host = '10.109.27.150'
 mongo_port = 27017
 
-
 espn_regex = re.compile(r'/football/')
 fixture_regex = re.compile(r'/fixtures/')
 
 PORT = 10000
-URL_TIMEOUT = 60		#Time-out to wait for page to load
+URL_TIMEOUT = 5		#Time-out to wait for page to load
 
 class Crawler():
 
@@ -107,10 +106,7 @@ class Crawler():
 					crawler_ack = 'f'
 			except HTTPError, e: 
 				print "Crawl failed - HTTP error"
-				if e.code >= 400 and e.code<= 417:
-					crawler_ack = 'd'
-				else:
-					crawler_ack = 'f'
+				crawler_ack = 'f'
 			except URLError:
 				print "Crawl failed - Could not open page"
 				crawler_ack = 'f'
@@ -121,7 +117,7 @@ class Crawler():
 					links_found = list( self.br.links() )
 				except BrowserStateError:
 					print "Crawl failed - Mechanize error"
-					crawler_ack = 'd'
+					crawler_ack = 'f'
 				except socket.timeout:
 					print "Crawl failed - links() timed out"
 					crawler_ack = 'f'

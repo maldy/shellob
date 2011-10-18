@@ -5,7 +5,7 @@ import Queue
 import pickle
 
 REVISIT_TIMEOUT = 900		#Time-out (in seconds) to reattempt a failed crawl.
-CRAWLER_TIMEOUT = 60 	#Time-out after which crawler is assumed dead.
+CRAWLER_TIMEOUT = 600 	#Time-out after which crawler is assumed dead.
 DISK_SAVE_INTERVAL = 300 #Interval after which important data is saved to disk.
 MAX_TIMEOUTS = 1 
 

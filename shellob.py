@@ -20,12 +20,15 @@ gmail dot com)"
 import re
 
 import socket
-import time
+import datetime
 import errno
 
 # stuff you'll have to install - all available with python setuptools
 from mechanize import Browser, HTTPError, URLError, BrowserStateError
 import pymongo
+
+mongo_host = '10.109.27.150'
+mongo_port = 27017
 
 
 espn_regex = re.compile(r'/football/')
@@ -81,7 +84,7 @@ class Crawler():
 			url = url_msg[depth_end+1:]
 			depth = int(url_msg[0:depth_end])
 	
-			print str(time.ctime()) + " URL received from queue server ->" + url +\
+			print str(datetime.datetime.utcnow()) + " URL received from queue server ->" + url +\
 			" Depth : " + str(depth)
 			
 			# fetch url contents (filter stuff here)
@@ -91,6 +94,14 @@ class Crawler():
 				if response:
 					print "Crawl successful"
 					crawler_ack = 's'
+
+					connection = pymongo.Connection(mongo_host, mongo_port)
+					db = connection.final_espn_corpus
+					html = response.read()
+					post = {"url": url, "crawl_time": datetime.datetime.utcnow(), "content": html}
+					posts = db.pages
+					posts.update({"url": url},post, True)
+
 				else:
 					print "Crawl failed - Timeout"
 					crawler_ack = 'f'

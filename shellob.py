@@ -41,7 +41,6 @@ class Crawler():
 		self.br.set_handle_redirect(True)
 		self.queue_server = {"host": "localhost", "port": PORT}
 		self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)	
-		self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
 		try: 
 			self.sock.connect((self.queue_server['host'], self.queue_server['port']))

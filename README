@@ -1,4 +1,4 @@
-shellob.py
+     Shellob
 
      !      !
    \._\____/_./
@@ -6,5 +6,18 @@ shellob.py
     .-\____/-.
    /   oOOo   \
        <  >
-    
-A simple webcrawler.
+  
+A distributed webcrawler and pagerank / tf-idf based search engine
+for www.espnstar.com/football.
+
+IR Assignment: 2; Group: 6
+
+Indexed with an inverted positional index. Supports multiple query terms and phrase queries.
+
+To run the search tool,
+
+	1. set permissions: 'chmod +x search.py; chmod +x search_tool.html; chmod +x cgi-bin/results.py'
+	2. change to the working directory and run './search.py' (this will take a few minutes)
+	3. open a new terminal, change to the working directory and run 'python -m CGIHTTPServer'
+	4. go to 'http://localhost:8000/search_tool.html' on a browser
+	5. enjoy!

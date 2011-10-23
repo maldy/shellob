@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 
-import socket, time, threading
+import socket, threading
+from datetime import datetime
+from time import time
 import Queue
 import pickle
 
@@ -9,7 +11,7 @@ from pygraph.readwrite.markup import write, read
 
 REVISIT_TIMEOUT = 900		#Time-out (in seconds) to reattempt a failed crawl.
 CRAWLER_TIMEOUT = 1800 	#Time-out after which crawler is assumed dead.
-DISK_SAVE_INTERVAL = 10 #Interval after which important data is saved to disk.
+DISK_SAVE_INTERVAL = 60 #Interval after which important data is saved to disk.
 MAX_TIMEOUTS = 1 
 
 LISTEN_PORT = 10000
@@ -60,26 +62,40 @@ def restore_list_from_file(set_file_name):
 	url_file.close()
 	return url_set
 
-def write_to_disk():
-	grand_file = open( GRAND_FILE, "w" )
-	failed_file = open( FAILED_FILE, "w" )
-	roster_file = open( ROSTER_FILE, "w" )
-	visited_file = open( VISITED_FILE, "w" )
-	graph_file = open( GRAPH_FILE, "w" )
+class Logger(threading.Thread):
+	def __init__(self, start_time):
+		self.start_time = start_time
+		threading.Thread.__init__(self)
 
-	pickle.dump(roster_dict, roster_file)
-	pickle.dump(failed_dict, failed_file)
+	def run(self):	
+		last_save_time = self.start_time
+		while True:
+			last_save_time = write_to_disk(last_save_time)
 
-	graph_xml_str = write( espn_graph )
-	graph_file.write( graph_xml_str )
+def write_to_disk(last_save_time):
+	if time() - last_save_time > DISK_SAVE_INTERVAL:
+		grand_file = open( GRAND_FILE, "w" )
+		failed_file = open( FAILED_FILE, "w" )
+		roster_file = open( ROSTER_FILE, "w" )
+		visited_file = open( VISITED_FILE, "w" )
+		graph_file = open( GRAPH_FILE, "w" )
 
-	for url in visited_list:
-		visited_file.write(url + "\n")
+		pickle.dump(roster_dict, roster_file)
+		pickle.dump(failed_dict, failed_file)
 
-	for url in grand_list:
-		grand_file.write(url + "\n")
+		graph_xml_str = write( espn_graph )
+		graph_file.write( graph_xml_str )
 
-	print "Wrote to disk"
+		for url in visited_list:
+			visited_file.write(url + "\n")
+
+		for url in grand_list:
+			grand_file.write(url + "\n")
+
+		print "Wrote to disk"
+		last_save_time = time()
+
+	return last_save_time
 
 class HandlerWrapper(threading.Thread):
 	def __init__(self, client,client_id, conn_addr):
@@ -103,12 +119,10 @@ class ClientHandler():
 		self.crawler_timed_out = False
 		self.n_timeouts = 0
 		self.log_file = "crawler" + str(self.client_id)
-		self.start_time = time.time()
-		self.last_save_time = time.time()
 							 
 	def print_log(self, msg):
 		log_file = open("log/" + self.log_file, "a")
-		msg_prefix = "[" + time.ctime(time.time()) + "] " + str(self.conn_addr[0]) +\
+		msg_prefix = "[" + str(datetime.utcnow()) + "] " + str(self.conn_addr[0]) +\
 								":" + str(self.conn_addr[1]) + " "
 		log_file.write(msg_prefix +  msg + "\n")
 
@@ -139,9 +153,9 @@ class ClientHandler():
 		depth, url, parent_url, url_type = url_info['depth'], url_info['url'],\
 											 								url_info['parent'], url_info['type']
 
-		if url_type is "failed":
-			failed_queue.put( (depth, parent_url, url, time.time()) )
-		elif url_type is "roster":
+		if url_type == "failed":
+			failed_queue.put( (depth, parent_url, url, datetime.utcnow()) )
+		elif url_type == "roster":
 			#We increase the depth so that the crawler doesn't constantly
 			#time out on the same URL.
 			#Note that roster_queue does not need timestamp information.
@@ -152,12 +166,12 @@ class ClientHandler():
 											 								url_info['parent'], url_info['type']
 		log_msg = url
 
-		if ack[0] is "s":
+		if ack[0] == "s":
 			log_msg += " (Complete)"
 			self.print_log( log_msg ) 
 			visited_list.add(url.strip())
 
-			if url_type is "failed":
+			if url_type == "failed":
 				failed_dict.pop(url)
 
 			#Add new node to graph.
@@ -166,15 +180,15 @@ class ClientHandler():
 				self.add_new_edge( parent_url, url )
 		
 		#If ack indicates a crawl which failed due to HTTP reasons.
-		elif ack[0] is "f":
+		elif ack[0] == "f":
 			log_msg += " (Failed)"
 			self.print_log( log_msg )
 
 			#If the crawl failed, we add it to the failed queue as well
 			#as the failed list.
 			if not failed_dict.has_key(url):
-				failed_queue.put( (depth, parent_url, url, time.time() ) )
-				failed_dict[url] = (depth, parent_url, time.time() )
+				failed_queue.put( (depth, parent_url, url, time() ) )
+				failed_dict[url] = (depth, parent_url, time() )
 
 	#Gets next URL to be crawled.
 	#Returns (depth, url, url_type) where,
@@ -196,9 +210,9 @@ class ClientHandler():
 
 			try:
 				failed_url_info = failed_queue.get_nowait()
-
 				timestamp = failed_url_info[3]
-				if time.time() - timestamp > REVISIT_TIMEOUT:
+
+				if time() - timestamp > REVISIT_TIMEOUT:
 					depth = failed_url_info[0]
 					url = failed_url_info[1]
 					parent_url = failed_url_info[2]
@@ -217,6 +231,10 @@ class ClientHandler():
 				except Queue.Empty:
 					pass
 
+		if url_type == "failed":
+			print "This URL failed before " + url 
+		elif url_type == "roster":
+			print "This is an unvisited URL " + url
 		url_info = {'depth' : depth, 'url' : url, 'parent' : parent_url,\
 								'type' : url_type}
 		return url_info 
@@ -346,10 +364,6 @@ class ClientHandler():
 	
 			self.parse_crawler_messages( crawler_response, url_to_crawl_info )
 
-			if time.time() - self.last_save_time > DISK_SAVE_INTERVAL:
-				write_to_disk()
-				self.last_save_time = time.time()
-
 		self.print_log( "Connection terminated\n" )
 		print "Connection terminated"
 		self.client.close()
@@ -379,7 +393,6 @@ class Queue_server():
 			client_threads_list.append(client_thread)
 			client_thread.start()
 	
-
 #Each entry in the roster_queue is of the form ( depth, parent_url, url )
 #where "depth" is the distance from the seed URL.
 #parent_url is the parent from which this url was reached.
@@ -428,4 +441,7 @@ if len(grand_list) is 0:
 	grand_list.add(SEED_URL)
 
 server = Queue_server('localhost',LISTEN_PORT)
+
+logger = Logger(time())
+logger.start()
 server.start()

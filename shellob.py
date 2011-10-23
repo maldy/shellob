@@ -33,6 +33,7 @@ mongo_port = 27017
 
 espn_regex = re.compile(r'http://(www.){,1}espnstar.com/football/')
 fixture_regex = re.compile(r'/fixtures/')
+bad_url_regex = re.compile(r'/[0-9]|/URL')
 
 PORT = 10000
 URL_TIMEOUT = 600		#Time-out to wait for page to load
@@ -107,23 +108,9 @@ class Crawler():
 			# fetch url contents (filter stuff here)
 			try : 
 				response = self.br.open(url,timeout=URL_TIMEOUT)
-
+				
 				if response:
-					print "Crawl successful"
 					crawler_ack = 's'
-
-					html = response.read()
-					(title, body) = parse_doc(html)
-
-					#URL normalization. End all URLs with a '/'.
-					if url[-1] != "/":
-						url += "/"
-
-					post = {"url": url, "crawl_time": datetime.utcnow(), "title" : title,\
-							    "body" : body}
-
-					db.pages.update({"url": url},post, True)
-
 				else:
 					print "Crawl failed - Timeout"
 					crawler_ack = 'f'
@@ -150,7 +137,8 @@ class Crawler():
 
 			for link in links_found:
 				if espn_regex.search(link.absolute_url) and not \
-						fixture_regex.search(link.absolute_url):
+						fixture_regex.search(link.absolute_url) and not \
+						bad_url_regex.search(link.absolute_url):
 					
 					if link.absolute_url[-1] is not '/':
 						link.absolute_url += '/'
@@ -159,6 +147,19 @@ class Crawler():
 					crawler_msg += url_msg
 		
 			bytes_sent = self.send_msg( crawler_msg, '\0' )
+
+			if response and len(links_found) > 0 and crawler_ack == 's':
+				html = response.read()
+				(title, body) = parse_doc(html)
+
+				#URL normalization. End all URLs with a '/'.
+				if url[-1] != "/":
+					url += "/"
+
+				post = {"url": url, "crawl_time": datetime.utcnow(), "title" : title,\
+						    "body" : body}
+
+				db.pages.update({"url": url},post, True)
 
 		self.sock.close()
 		connection.disconnect()
@@ -170,7 +171,6 @@ def main():
 	
 if __name__ == "__main__":
 	main()
-
 
 ##############################
 # Code Snippet dump - ignore #

@@ -20,21 +20,36 @@ gmail dot com)"
 import re
 
 import socket
-import datetime
+from datetime import datetime 
 import errno
 
 # stuff you'll have to install - all available with python setuptools
 from mechanize import Browser, HTTPError, URLError, BrowserStateError
 import pymongo
+import lxml.html
 
-mongo_host = '10.109.27.150'
+mongo_host = 'localhost'
 mongo_port = 27017
 
-espn_regex = re.compile(r'/football/')
+espn_regex = re.compile(r'http://(www.){,1}espnstar.com/football/')
 fixture_regex = re.compile(r'/fixtures/')
 
 PORT = 10000
-URL_TIMEOUT = 5		#Time-out to wait for page to load
+URL_TIMEOUT = 600		#Time-out to wait for page to load
+
+#Instead of inserting the entire html page into db, we parse the content and 
+#insert only the title and the text in the page. 
+def parse_doc(html_file):
+	title = ""
+	doc = ""
+	html = lxml.html.fromstring(html_file)
+	title_el = html.xpath('//title')
+	if title_el:
+		title = title_el[0].text_content()
+	div_el = html.find_class('freestyle-text')
+	if div_el:
+		doc = div_el[0].text_content()
+	return (title, re.sub(r'[\r\n]', ' ', doc))
 
 class Crawler():
 
@@ -73,6 +88,9 @@ class Crawler():
 
 	def crawl(self):
 
+		connection = pymongo.Connection(mongo_host, mongo_port)
+		db = connection.test_corpus
+
 		while True:
 			# grab the next url off the queue server
 			buf_left = 10000 
@@ -83,7 +101,7 @@ class Crawler():
 			url = url_msg[depth_end+1:]
 			depth = int(url_msg[0:depth_end])
 	
-			print str(datetime.datetime.utcnow()) + " URL received from queue server ->" + url +\
+			print str(datetime.utcnow()) + " URL received from queue server ->" + url +\
 			" Depth : " + str(depth)
 			
 			# fetch url contents (filter stuff here)
@@ -94,12 +112,17 @@ class Crawler():
 					print "Crawl successful"
 					crawler_ack = 's'
 
-					connection = pymongo.Connection(mongo_host, mongo_port)
-					db = connection.final_espn_corpus
 					html = response.read()
-					post = {"url": url, "crawl_time": datetime.datetime.utcnow(), "content": html}
-					posts = db.pages
-					posts.update({"url": url},post, True)
+					(title, body) = parse_doc(html)
+
+					#URL normalization. End all URLs with a '/'.
+					if url[-1] != "/":
+						url += "/"
+
+					post = {"url": url, "crawl_time": datetime.utcnow(), "title" : title,\
+							    "body" : body}
+
+					db.pages.update({"url": url},post, True)
 
 				else:
 					print "Crawl failed - Timeout"
@@ -138,6 +161,7 @@ class Crawler():
 			bytes_sent = self.send_msg( crawler_msg, '\0' )
 
 		self.sock.close()
+		connection.disconnect()
 	
 def main():
 	# thread and unleash shellob onto the unsuspecting site. Amok!

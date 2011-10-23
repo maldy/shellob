@@ -14,11 +14,11 @@ MAX_TIMEOUTS = 1
 
 LISTEN_PORT = 10000
 
-ROSTER_FILE = "roster_file"
-FAILED_FILE = "failed_file"
-VISITED_FILE = "visited_file"
-GRAND_FILE = "grand_file"
-GRAPH_FILE = "espn_graph.xml"
+ROSTER_FILE = "qdata/roster_file"
+FAILED_FILE = "qdata/failed_file"
+VISITED_FILE = "qdata/visited_file"
+GRAND_FILE = "qdata/grand_file"
+GRAPH_FILE = "qdata/espn_graph.xml"
 
 SEED_URL = "http://www.espnstar.com/football/"
 
@@ -107,7 +107,7 @@ class ClientHandler():
 		self.last_save_time = time.time()
 							 
 	def print_log(self, msg):
-		log_file = open(self.log_file, "a")
+		log_file = open("log/" + self.log_file, "a")
 		msg_prefix = "[" + time.ctime(time.time()) + "] " + str(self.conn_addr[0]) +\
 								":" + str(self.conn_addr[1]) + " "
 		log_file.write(msg_prefix +  msg + "\n")

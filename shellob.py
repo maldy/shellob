@@ -32,8 +32,7 @@ mongo_host = 'localhost'
 mongo_port = 27017
 
 espn_regex = re.compile(r'http://(www.){,1}espnstar.com/football/')
-fixture_regex = re.compile(r'/fixtures/')
-bad_url_regex = re.compile(r'/[0-9]|/URL')
+bad_regex = re.compile(r'/fixtures/{,1}|/URL/{,1}|/galleries/{,1}|/videos/{,1}|/[0-9]/{,1}')
 
 PORT = 10000
 URL_TIMEOUT = 600		#Time-out to wait for page to load
@@ -137,8 +136,7 @@ class Crawler():
 
 			for link in links_found:
 				if espn_regex.search(link.absolute_url) and not \
-						fixture_regex.search(link.absolute_url) and not \
-						bad_url_regex.search(link.absolute_url):
+						bad_regex.search(link.absolute_url):
 					
 					if link.absolute_url[-1] is not '/':
 						link.absolute_url += '/'

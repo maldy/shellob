@@ -4,6 +4,7 @@ import socket, threading
 from datetime import datetime
 from traceback import print_exc
 from time import time
+from sys import exc_info
 import Queue
 import pickle
 import re
@@ -13,31 +14,17 @@ from pygraph.readwrite.markup import write, read
 
 REVISIT_TIMEOUT = 60		#Time-out (in seconds) to reattempt a failed crawl.
 CRAWLER_TIMEOUT = 1800 	#Time-out after which crawler is assumed dead.
-DISK_SAVE_INTERVAL = 60 #Interval after which important data is saved to disk.
-MAX_TIMEOUTS = 1 
+DISK_SAVE_INTERVAL = 10 #Interval after which important data is saved to disk.
+CLIENT_EXIT_TIMEOUT = 1.0 #If queue server shuts down for any reason, we wait for
+											  #this many seconds before shutting down the connection 
+												#forcefully.
 
 LISTEN_PORT = 10000
-
-ROSTER_FILE = "qdata/roster"
-FAILED_FILE = "qdata/failed"
-VISITED_FILE = "qdata/visited"
-GRAND_FILE = "qdata/grand"
-URL_DOCID_FILE = "qdata/url_docID"
-DOCID_URL_FILE = "qdata/docID_url"
-GRAPH_FILE = "qdata/espn_graph.xml"
-ITEM_FILE = "qdata/item_nos"
 
 SEED_URL = "http://www.espnstar.com/football/"
 
 #The next docID that will be assigned.
 next_docID = 0
-
-roster_lock = threading.Lock()
-failed_lock = threading.Lock()
-grand_lock = threading.Lock()
-graph_lock = threading.Lock()
-docID_maps_lock = threading.Lock()
-item_nos_lock = threading.Lock()
 
 item_regex = re.compile(r'/(item)([0-9]*)/')
 
@@ -46,14 +33,20 @@ item_regex = re.compile(r'/(item)([0-9]*)/')
 def assign_docID(url):
 	global next_docID 
 
-	docID_maps_lock.acquire()
+	acquire_lock(["docID_url", "url_docID"])
 	url_docID_map[url] = next_docID
 	docID_url_map[next_docID] = url
 
 	next_docID += 1
 	docID_url_map['next_docID'] = next_docID
-	docID_maps_lock.release()
+	release_lock(["docID_url", "url_docID"])
 	return next_docID - 1
+
+def acquire_lock(lock_names):
+	[locks[name].acquire() for name in lock_names]
+
+def release_lock(lock_names):
+	[locks[name].release() for name in lock_names]
 
 def restore_queue_from_file(queue_file_name):
 	queue = Queue.PriorityQueue()
@@ -87,9 +80,10 @@ def restore_list_from_file(set_file_name):
 	except IOError:
 		return url_set
 
-	url_str = url_file.read().split('\n')
-	for url in url_str:
-		url_set.add(url)
+	strings = url_file.read().split('\n')
+
+	for string in strings:
+		url_set.add(string)
 
 	url_file.close()
 	return url_set
@@ -97,73 +91,60 @@ def restore_list_from_file(set_file_name):
 class Logger(threading.Thread):
 	def __init__(self, start_time):
 		self.start_time = start_time
+		self.continue_logging = True
 		threading.Thread.__init__(self)
 
 	def run(self):	
 		last_save_time = self.start_time
-		while True:
-			last_save_time = write_to_disk(last_save_time)
+		while self.continue_logging:
+			if time() - last_save_time > DISK_SAVE_INTERVAL:
+				write_to_disk()
+				last_save_time = time()
 
-def write_to_disk(last_save_time):
-	if time() - last_save_time > DISK_SAVE_INTERVAL:
-		try : 
-			grand_file = open( GRAND_FILE, "w" )
-			failed_file = open( FAILED_FILE, "w" )
-			roster_file = open( ROSTER_FILE, "w" )
-			visited_file = open( VISITED_FILE, "w" )
-			url_docID_file = open( URL_DOCID_FILE, "w" )
-			docID_url_file = open( DOCID_URL_FILE, "w" )
-		except : 
-			print_exc()
+	def end(self):
+		self.continue_logging = False
 
-		try : 
-			roster_lock.acquire()
-			pickle.dump(roster_dict, roster_file)
-			roster_lock.release()
+#Use appropriate write method for data type.
+def write_data(var_string): 
+	fd = open( file_names[var_string], "w" )
 
-			failed_lock.acquire()
-			pickle.dump(failed_dict, failed_file)
-			failed_lock.release()
+	data = globals()[string_var_map[var_string]]
+	acquire_lock([var_string])
 
-			docID_maps_lock.acquire()
-			pickle.dump( url_docID_map, url_docID_file )
-			pickle.dump( docID_url_map, docID_url_file ) 
-			docID_maps_lock.release()
-		except : 
-			print_exc()
+	if type(data).__name__ == "dict":
+		pickle.dump(data, fd)
+	elif type(data).__name__ == "set":
+		[fd.write(str(item) + "\n") for item in data]
+	elif type(data).__name__ == "digraph":
+		graph_xml = write( data )
+		fd.write( graph_xml )
 
-		try : 
-			graph_file = open( GRAPH_FILE, "w" )
+	release_lock([var_string])
+	fd.close()
 
-			graph_lock.acquire()
-			graph_xml_str = write( espn_graph )
-			graph_lock.release()
+def write_to_disk():
+	[write_data(var_string) for var_string in var_strings]
 
-			graph_file.write( graph_xml_str )
-		except : 
-			print_exc()
-
-		for url in visited_list:
-			visited_file.write(url + "\n")
-
-		for url in grand_list:
-			grand_file.write(url + "\n")
-
-		print "Wrote to disk"
-		last_save_time = time()
-
-	return last_save_time
+	print "Wrote to disk"
 
 class HandlerWrapper(threading.Thread):
 	def __init__(self, client,client_id, conn_addr):
 		self.client = client
 		self.client_id = client_id
 		self.conn_addr = conn_addr
+		self.continue_running = True
 		threading.Thread.__init__(self)
 
 	def run(self):
 		handler = ClientHandler(self.client, self.client_id, self.conn_addr)
-		handler.start()
+		while self.continue_running:
+			handler.start()
+
+		#Connection termination.
+		self.client.send("\0")
+
+	def end(self):
+		self.continue_running = False
 
 class ClientHandler():
 	def __init__(self, client, client_id, conn_addr):
@@ -173,10 +154,16 @@ class ClientHandler():
 		self.client = client
 		self.client_id = client_id
 		self.conn_addr = conn_addr
-		self.crawler_timed_out = False
-		self.n_timeouts = 0
 		self.log_file = "crawler" + str(self.client_id)
+		self.url_to_crawl_info = {}
 							 
+	def unpack_url_info(self):
+		depth, url, parent_url, url_type = self.url_to_crawl_info['depth'],\
+																			self.url_to_crawl_info['url'],\
+											 								self.url_to_crawl_info['parent'],\
+																			self.url_to_crawl_info['type']
+		return (depth, url, parent_url, url_type)
+
 	def print_log(self, msg):
 		log_file = open("log/" + self.log_file, "a")
 		msg_prefix = "[" + str(datetime.utcnow()) + "] " + str(self.conn_addr[0]) +\
@@ -185,30 +172,39 @@ class ClientHandler():
 
 	#Wrappers for the send and recv function to ensure proper delivery
 	#of messages.
-	def recv_delim(self, buf_len, delim):
+	def recv_msg(self, buf_len, delim):
 		data = ""
-		while True:
-			recv_data = self.client.recv(buf_len)
-			data += recv_data
-			if delim in data:
-				return data[:-1]
+		try : 
+			while True:
+				recv_data = self.client.recv(buf_len)
+				data += recv_data
+				if delim in data:
+					return data[:-1]
+		except : 
+			excName = exc_info()[0].__name__
+			self.handle_socket_error( excName ) 
+			exit(-1)	#Thread exit. Connection already dead, so no cleanup required. 
 
 	def send_msg(self, msg, delim):
 		msg_len = len(msg)
 		bytes_sent = 0
 
-		while bytes_sent < msg_len:
-			sent = self.client.send( msg + delim )
-			bytes_sent += sent
-			msg = msg[sent+1:]
+		try:
+			while bytes_sent < msg_len:
+				sent = self.client.send( msg + delim )
+				bytes_sent += sent
+				msg = msg[sent+1:]
 
-		return bytes_sent 
+			return bytes_sent 
+		except :
+			excName = exc_info()[0].__name__
+			self.handle_socket_error( excName ) 
+			exit(-1)	#Thread exit. Connection already dead, so no cleanup required. 
 
 	#If connection fails for any reason, we restore the URL back to the failed
 	#queue or roster queue as the case may be.
-	def handle_socket_error( self, url_info ):
-		depth, url, parent_url, url_type = url_info['depth'], url_info['url'],\
-											 								url_info['parent'], url_info['type']
+	def handle_socket_error( self, excName ):
+		depth, url, parent_url, url_type = self.unpack_url_info() 
 
 		if url_type == "failed":
 			failed_queue.put( (depth, parent_url, url, datetime.utcnow()) )
@@ -218,17 +214,22 @@ class ClientHandler():
 			#Note that roster_queue does not need timestamp information.
 			roster_queue.put( (depth + 1e-6, parent_url, url) )
 
-	def handle_ack( self, ack, url_info ):
-		depth, url, parent_url, url_type = url_info['depth'], url_info['url'],\
-											 								url_info['parent'], url_info['type']
+		if excName == "timeout":
+			self.print_log("Timed out")
+		else:
+			self.print_log("Socket error")
+
+	def handle_ack( self, ack ):
+		depth, url, parent_url, url_type = self.unpack_url_info()
+
 		log_msg = "-" 
 
-		failed_lock.acquire()
+		acquire_lock(["failed"])
 
 		if ack[0] == "s":
 			log_msg += " (Complete)"
 			self.print_log( log_msg ) 
-			visited_list.add(url.strip())
+			visited_set.add(url.strip())
 
 			#Since URL was crawled successfully, removed it from the failed list.
 			if url_type == "failed":
@@ -245,7 +246,7 @@ class ClientHandler():
 				failed_queue.put( (depth, url, parent_url, time() ) )
 				failed_dict[url] = (depth, parent_url, time() )
 
-		failed_lock.release()
+		release_lock(["failed"])
 
 	#Rudimentary duplicate checking. For espnstar.com/football, all news
 	#URLs are of the form item<num>/<title>. 
@@ -261,6 +262,7 @@ class ClientHandler():
 			if number in item_nos_set:
 				return True
 			else:
+				item_nos_set.add( number )
 				return False
 		else:	#Well, we really dont know in this case...
 			return False
@@ -281,54 +283,49 @@ class ClientHandler():
 		#are reattempted. 
 		#'depth' - Depth of the URL sent to the crawler.	
 		#'url' - URL sent to the crawler.
-		if self.crawler_timed_out is False:
+		try:
+			failed_url_info = failed_queue.get_nowait()
+			timestamp = failed_url_info[3]
 
-			try:
-				failed_url_info = failed_queue.get_nowait()
-				timestamp = failed_url_info[3]
-
-				if time() - timestamp > REVISIT_TIMEOUT:
-					depth = failed_url_info[0]
-					url = failed_url_info[1]
-					parent_url = failed_url_info[2]
-					url_type = "failed"
-				else:
-					failed_queue.put(failed_url_info)
+			if time() - timestamp > REVISIT_TIMEOUT:
+				depth = failed_url_info[0]
+				url = failed_url_info[1]
+				parent_url = failed_url_info[2]
+				url_type = "failed"
+			else:
+				failed_queue.put(failed_url_info)
 			
+		except Queue.Empty:
+			pass
+
+		if len(url) == 0:
+			try:  
+				url_info = roster_queue.get_nowait()
+				depth, parent_url, url = url_info
+				url_type = "roster"
 			except Queue.Empty:
 				pass
 
-			if len(url) == 0:
-				try:  
-					url_info = roster_queue.get_nowait()
-					depth, parent_url, url = url_info
-					url_type = "roster"
-				except Queue.Empty:
-					pass
-
-		url_info = {'depth' : depth, 'url' : url, 'parent' : parent_url,\
-								'type' : url_type}
+		self.url_to_crawl_info = {'depth' : depth, 'url' : url, \
+										'parent' : parent_url, 'type' : url_type}
 		return url_info 
 
 	#Parse response from crawler. Takes depth, url, url_type arguments for
 	#the sake of handling the ack message too.
-	def parse_crawler_messages(self, response, url_info ):
+	def parse_crawler_messages(self, response ):
 		msgs = response.split("*")
 		ack = msgs[0]
 
-		self.handle_ack( ack, url_info )
-		depth, url = url_info['depth'], url_info['url'],
+		self.handle_ack( ack )
+		depth, url, parent_url, url_type = self.unpack_url_info()
 
-		new_parent_url = url_info['url']
-
+		#Parent URL is now the URL that was just crawled.
+		parent_url = url
 		msgs = msgs[1:]
 		
-		grand_lock.acquire()
-		roster_lock.acquire()
-		failed_lock.acquire()
-		graph_lock.acquire()
+		p_docID = url_docID_map[parent_url]
 
-		p_docID = url_docID_map[new_parent_url]
+		acquire_lock(["grand", "graph", "failed", "roster", "item_nos"])
 
 		for msg in msgs:
 			if msg:
@@ -336,113 +333,64 @@ class ClientHandler():
 				depth = int(msg[:depth_end])
 				url = msg[depth_end+1:].strip()
 
-				if url not in grand_list and not self.is_dup(url):
-					grand_list.add( url )
+				if url not in grand_set and not self.is_dup(url):
+					grand_set.add( url )
 					docID = assign_docID( url )
 					espn_graph.add_node(docID)	
 				else:
 					docID = url_docID_map[url]
 
 				#Add new node and edge to graph.
-				if not espn_graph.has_edge([p_docID, docID]):
+#				print "Adding edge from " + docID_url_map[p_docID] + " (" +\
+#				str(p_docID)\
+#				+ ") to " + docID_url_map[docID] + " (" + str(docID) + ")"
+				if not espn_graph.has_edge([p_docID, docID]) and p_docID != docID:
 					espn_graph.add_edge([p_docID, docID])
 
-				if url not in visited_list and not roster_dict.has_key(url)\
+				if url not in visited_set and not roster_dict.has_key(url)\
 						and not failed_dict.has_key(url):
-					roster_queue.put( (depth, new_parent_url, url), True )
-					roster_dict[url] = (depth, new_parent_url)
+					roster_queue.put( (depth, parent_url, url), True )
+
+					roster_dict[url] = (depth, parent_url)
 	
-		grand_lock.release()
-		roster_lock.release()
-		failed_lock.release()
-		graph_lock.release()
+		release_lock(["grand", "graph", "failed", "roster", "item_nos"])
 
 	def start(self):
-		self.print_log( "--------------------------" )
-		self.print_log( "New connection accepted" )
+		self.get_next_url()
+		depth, url, parent_url, url_type = self.unpack_url_info() 
 
-		while True:
-			url_to_crawl_info = self.get_next_url()
-			depth = url_to_crawl_info['depth']
-			url = url_to_crawl_info['url']
-			parent_url = url_to_crawl_info['parent']
-			url_type = url_to_crawl_info['type']
+		#If the url field is empty, it means there is nothing new left to crawl.
+		#Crawling is complete!
+		#Else, we have to crawl.
+		if url:
+			log_msg = "Asking crawler " + str(self.client_id) +\
+						" to visit " + url + " at depth " +\
+							str(depth)
 
-			#If the url field is empty, it means there is nothing new left to crawl.
-			#Crawling is complete!
-			#Else, we have to crawl.
-			if url:
-				log_msg = "Asking crawler " + str(self.client_id) +\
-							" to visit " + url + " at depth " +\
-								str(depth)
+			self.print_log( log_msg )
+
+			#Depth is packaged along with link. It's easier to ask crawler to
+			#increment the depth than ask queue server to keep track of current depth.
+			#Message format is : | Depth | \1 | URL | \0 |
+
+			url_msg = str(int(depth)) + '\1' + url
 	
-				self.print_log( log_msg )
+			#Attempt to reconnect if the crawler has timed out.
+			bytes_sent = self.send_msg(url_msg, '\0')
 
-				#Depth is packaged along with link. It's easier to ask crawler to
-				#increment the depth than ask queue server to keep track of current depth.
-				#Message format is : | Depth | \1 | URL | \0 |
+		else:
+			self.print_log( "Out of URLs. Completed crawling!" )
+			exit(0)
 
-				url_msg = str(int(depth)) + '\1' + url
-		
-				try:
-					#Attempt to reconnect if the crawler has timed out.
-					bytes_sent = self.send_msg(url_msg, '\0')
-				except socket.timeout:
-					log_msg = " " + url + " (Crawler timed out)"
-					self.crawler_timed_out = True
-					self.handle_socket_error( url_to_crawl_info ) 
-					self.n_timeouts += 1
+		#We block on the response from the crawler.
+		#The first 1 byte of the response is an ack from the crawler.
+		#If the crawl was successful, the rest of the response consists
+		#of all the URLs found on that page.
+		#If the crawl failed for any reason, the ack is the only information
+		#present in the message.
+		crawler_response = self.recv_msg( 10000, '\0' )	
 
-					self.print_log( log_msg )
-
-				except socket.error:
-					self.handle_socket_error( url_to_crawl_info ) 
-
-					self.print_log( log_msg )
-					break		#Evidently a break-down in the connection. Better to end it.
-
-			else:
-				self.print_log( "Out of URLs. Completed crawling!" )
-				break
-	
-			#We block on the response from the crawler.
-			#The first 1 byte of the response is an ack from the crawler.
-			#If the crawl was successful, the rest of the response consists
-			#of all the URLs found on that page.
-			#If the crawl failed for any reason, the ack is the only information
-			#present in the message.
-			try : 
-				crawler_response = self.recv_delim( 10000, '\0' )	
-				if self.crawler_timed_out is True:
-					self.crawler_timed_out = False
-					self.n_timeouts = 0
-
-			except socket.timeout:
-				self.n_timeouts += 1
-				self.crawler_timed_out = True
-
-				if self.n_timeouts is 1:
-					log_msg = " " + url + " (Crawler timed out)"
-					self.print_log( log_msg )
-
-				if self.n_timeouts == MAX_TIMEOUTS:
-					self.handle_socket_error( url_to_crawl_info ) 
-					log_msg = " Maximum number of time outs reached. Terminating"\
-									+ " connection."
-					self.print_log( log_msg )
-					break
-
-			except socket.error:
-				self.handle_socket_error( url_to_crawl_info ) 
-
-				self.print_log( log_msg )
-				break
-	
-			self.parse_crawler_messages( crawler_response, url_to_crawl_info )
-
-		self.print_log( "Connection terminated\n" )
-		print "Connection terminated"
-		self.client.close()
+		self.parse_crawler_messages( crawler_response )
 
 class Queue_server():
 	def __init__(self, host, port):
@@ -466,40 +414,63 @@ class Queue_server():
 			client_thread = HandlerWrapper(conn_socket, client_id, conn_addr)
 
 			client_id += 1
-			client_threads_list.append(client_thread)
+			client_threads.append( client_thread )
+			#client_thread.daemon = True
 			client_thread.start()
 	
+client_threads = []
+
+#Create locks for shared data structures.
+var_strings = ["roster", "failed", "grand", "graph", "docID_url",\
+							"url_docID", "item_nos", "visited"]
+locks = {}
+
+for name in var_strings:
+	locks[name] = threading.Lock()
+
+file_names = { "roster" : "qdata/roster", "failed" : "qdata/failed",\
+							 "visited" : "qdata/visited", "grand" : "qdata/grand",\
+							 "url_docID" : "qdata/url_docID",\
+							 "docID_url" : "qdata/docID_url",\
+							 "graph" : "qdata/graph.xml",\
+							 "item_nos" : "qdata/item_nos" }
+							
+string_var_map = {"roster" : "roster_dict", "failed" : "failed_dict",\
+		"visited" : "visited_set", "grand" : "grand_set",\
+		"url_docID" : "url_docID_map", "docID_url" : "docID_url_map",
+		"graph" : "espn_graph", "item_nos" : "item_nos_set"}
+
 #Each entry in the roster_queue is of the form ( depth, parent_url, url )
 #where "depth" is the distance from the seed URL.
 #parent_url is the parent from which this url was reached.
-roster_queue, roster_dict = restore_queue_from_file( ROSTER_FILE )
+roster_queue, roster_dict = restore_queue_from_file( file_names["roster"] )
 
 #Each entry in failed_Queue is of the form (depth, parent_url, url, timestamp) 
 #where "timestamp" is the time at which previous crawl occurred. 
-failed_queue, failed_dict = restore_queue_from_file( FAILED_FILE )
+failed_queue, failed_dict = restore_queue_from_file( file_names["failed"] )
 
 #List of URLs already crawled.
 #Each entry is of the form (depth, parent_url, url, timestamp)
 #timestamp -> Time of crawl.
-visited_list = restore_list_from_file( VISITED_FILE )
+visited_set = restore_list_from_file( file_names["visited"] )
 
 #Grand list of URLs i.e. URLs known to exist.
-grand_list = restore_list_from_file( GRAND_FILE )
+grand_set = restore_list_from_file( file_names["grand"] )
 
 item_nos_set = set([])
 try :
-	item_file = open( ITEM_FILE, "r")
-	str_items = item_file.read().split('\n')
-	for str_item in str_items:
-		item_no = int(str_item)
-		item_nos_set.add(item_no)
+	item_file = open( file_names["item_nos"], "r")
+	str_items = set(item_file.read().split('\n'))
+	str_items.remove('')
+
+	[item_nos_set.add(int(item_no)) for item_no in str_items]
 except IOError:
 	pass 
 
-#ESPN graph of URLs crawled. Made from visited_list.
+#ESPN graph of URLs crawled. Made from visited_set.
 #Read graph from file.
 try :
-	graph_file = open( GRAPH_FILE, "r")
+	graph_file = open( file_names["graph"], "r")
 	graphstr = graph_file.read()
 	espn_graph = read(graphstr)
 except IOError:
@@ -507,15 +478,15 @@ except IOError:
 
 #ID->URL for each node in espn_graph. 
 try :
-	docID_url_file = open(DOCID_URL_FILE, "r")
+	docID_url_file = open(file_names["docID_url"], "r")
 	docID_url_map = pickle.load(docID_url_file)
-	node_id = docID_url_map['next_docID']
+	next_docID = docID_url_map['next_docID']
 except IOError:
 	docID_url_map = {'next_docID' : 1}
 
 #URL->ID for each node in espn_graph
 try :
-	url_docID_file = open(URL_DOCID_FILE, "r")
+	url_docID_file = open(file_names["url_docID"], "r")
 	url_docID_map = pickle.load(url_docID_file)
 except IOError:
 	url_docID_map = {}
@@ -523,13 +494,25 @@ except IOError:
 if roster_queue.empty():
 	roster_queue.put( (0, "root", SEED_URL) )		
 
-if len(grand_list) is 0:
-	grand_list.add(SEED_URL)
+if len(grand_set) is 0:
+	grand_set.add(SEED_URL)
 	_docID = assign_docID(SEED_URL)
 	espn_graph.add_node(_docID)
 
 server = Queue_server('localhost',LISTEN_PORT)
 
-logger = Logger(time())
-logger.start()
-server.start()
+try : 
+	logger = Logger(time())
+	logger.start()
+	server.start()
+except : 
+	for thread in client_threads:
+		thread.end()
+		thread.join()
+
+	logger.end()
+	logger.join()
+	#Do one last log update.
+	write_to_disk()
+	print "Final write to disk"
+	exit(0)

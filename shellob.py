@@ -67,7 +67,7 @@ class Crawler():
 			print message
 			return
 
-	def recv_delim(self, buf_len, delim):
+	def recv_msg(self, buf_len, delim):
 		data = ""
 		while True:
 			recv_data = self.sock.recv(buf_len)
@@ -94,8 +94,15 @@ class Crawler():
 		while True:
 			# grab the next url off the queue server
 			buf_left = 10000 
+			response = ""
 
-			url_msg = self.recv_delim( 4096, '\0')
+			print "Waiting for queue server"
+			url_msg = self.recv_msg( 4096, '\0')
+
+			if url_msg == "":
+				print "Queue server terminated connection"
+				break
+
 			depth_end = url_msg.find('\1')
 
 			url = url_msg[depth_end+1:]
@@ -103,7 +110,7 @@ class Crawler():
 	
 			print str(datetime.utcnow()) + " URL received from queue server ->" + url +\
 			" Depth : " + str(depth)
-			
+
 			# fetch url contents (filter stuff here)
 			try : 
 				response = self.br.open(url,timeout=URL_TIMEOUT)
@@ -128,25 +135,13 @@ class Crawler():
 					links_found = list( self.br.links() )
 				except BrowserStateError:
 					print "Crawl failed - Mechanize error"
-					crawler_ack = 'f'
+					crawler_ack = 'd'
 				except socket.timeout:
 					print "Crawl failed - links() timed out"
 					crawler_ack = 'f'
 
 			crawler_msg = crawler_ack + "*"
 			depth += 1	#All links in this page are at lower depth.
-
-			for link in links_found:
-				if espn_regex.search(link.absolute_url) and not \
-						bad_regex.search(link.absolute_url):
-					
-					if link.absolute_url[-1] is not '/':
-						link.absolute_url += '/'
-
-					url_msg = str(depth) + '\1' + link.absolute_url + '*'
-					crawler_msg += url_msg
-		
-			bytes_sent = self.send_msg( crawler_msg, '\0' )
 
 			if response and len(links_found) > 0 and crawler_ack == 's':
 				html = response.read()
@@ -160,6 +155,18 @@ class Crawler():
 						    "body" : body}
 
 				db.pages.update({"url": url},post, True)
+
+			for link in links_found:
+				if espn_regex.search(link.absolute_url) and not \
+						bad_regex.search(link.absolute_url):
+					
+					if link.absolute_url[-1] is not '/':
+						link.absolute_url += '/'
+
+					url_msg = str(depth) + '\1' + link.absolute_url + '*'
+					crawler_msg += url_msg
+		
+			bytes_sent = self.send_msg( crawler_msg, '\0' )
 
 		self.sock.close()
 		connection.disconnect()

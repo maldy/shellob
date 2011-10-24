@@ -288,7 +288,6 @@ class ClientHandler():
 				timestamp = failed_url_info[3]
 
 				if time() - timestamp > REVISIT_TIMEOUT:
-					print "From failed"
 					depth = failed_url_info[0]
 					url = failed_url_info[1]
 					parent_url = failed_url_info[2]
@@ -301,7 +300,6 @@ class ClientHandler():
 
 			if len(url) == 0:
 				try:  
-					print "From roster"
 					url_info = roster_queue.get_nowait()
 					depth, parent_url, url = url_info
 					url_type = "roster"
@@ -310,7 +308,6 @@ class ClientHandler():
 
 		url_info = {'depth' : depth, 'url' : url, 'parent' : parent_url,\
 								'type' : url_type}
-		print str(url_info)
 		return url_info 
 
 	#Parse response from crawler. Takes depth, url, url_type arguments for

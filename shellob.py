@@ -114,8 +114,10 @@ class Crawler():
 					print "Crawl failed - Timeout"
 					crawler_ack = 'f'
 			except HTTPError, e: 
+				#Much internal debate on this, but "d" is the best
+				#response I believe rather than enqueuing it again and again.
 				print "Crawl failed - HTTP error"
-				crawler_ack = 'f'
+				crawler_ack = 'd'
 			except URLError:
 				print "Crawl failed - Could not open page"
 				crawler_ack = 'f'

@@ -178,17 +178,3 @@ def main():
 	
 if __name__ == "__main__":
 	main()
-
-##############################
-# Code Snippet dump - ignore #
-##############################
-"""
-		response = self.br.open(url)
-		for link in self.br.links():
-			print link
-		response.seek(0)
-		html = response.read()
-		root = lxml.html.fromstring(html)
-		for link in root.iterlinks():
-			print link
-"""

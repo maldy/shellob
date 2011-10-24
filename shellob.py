@@ -27,6 +27,7 @@ import errno
 from mechanize import Browser, HTTPError, URLError, BrowserStateError
 import pymongo
 import lxml.html
+from lepl.apps._test.rfc3696 import HttpUrl
 
 mongo_host = 'localhost'
 mongo_port = 27017
@@ -89,7 +90,8 @@ class Crawler():
 	def crawl(self):
 
 		connection = pymongo.Connection(mongo_host, mongo_port)
-		db = connection.test_corpus
+		db = connection.espn_corpus
+		valid_url = HttpUrl()
 
 		while True:
 			# grab the next url off the queue server
@@ -158,7 +160,8 @@ class Crawler():
 
 			for link in links_found:
 				if espn_regex.search(link.absolute_url) and not \
-						bad_regex.search(link.absolute_url):
+						bad_regex.search(link.absolute_url) and \
+						valid_url(link.absolute_url) is True:		
 					
 					if link.absolute_url[-1] is not '/':
 						link.absolute_url += '/'

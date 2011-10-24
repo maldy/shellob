@@ -12,9 +12,9 @@ import re
 from pygraph.classes.digraph import digraph
 from pygraph.readwrite.markup import write, read
 
-REVISIT_TIMEOUT = 60		#Time-out (in seconds) to reattempt a failed crawl.
-CRAWLER_TIMEOUT = 0.5 		#Time-out after which crawler is assumed dead.
-DISK_SAVE_INTERVAL = 60 #Interval after which important data is saved to disk.
+REVISIT_TIMEOUT = 900			#Time-out (in seconds) to reattempt a failed crawl.
+CRAWLER_TIMEOUT = 900 		#Time-out after which crawler is assumed dead.
+DISK_SAVE_INTERVAL = 600 #Interval after which important data is saved to disk.
 
 LISTEN_PORT = 10000
 
@@ -31,10 +31,9 @@ def assign_docID(url):
 	url_docID_map[url] = unicode(next_docID)
 	docID_url_map[unicode(next_docID)] = url
 
-	next_docID += 1
-	docID_url_map['next_docID'] = next_docID
+	docID_url_map['next_docID'] = next_docID + 1
 	release_lock(["docID_url", "url_docID"])
-	return next_docID - 1
+	return next_docID 
 
 def acquire_lock(lock_names):
 	[locks[name].acquire() for name in lock_names]
@@ -307,7 +306,6 @@ class ClientHandler():
 
 		self.url_to_crawl_info = {'depth' : depth, 'url' : url, \
 										'parent' : parent_url, 'type' : url_type}
-		return url_info 
 
 	#Parse response from crawler. Takes depth, url, url_type arguments for
 	#the sake of handling the ack message too.
@@ -340,6 +338,7 @@ class ClientHandler():
 					docID = url_docID_map[url]
 
 				#Add new node and edge to graph.
+				print str(p_docID) + " -> " + str(docID)
 				if not espn_graph.has_edge([unicode(p_docID), unicode(docID)])\
 						and p_docID != docID:
 					espn_graph.add_edge([unicode(p_docID), unicode(docID)])
@@ -471,7 +470,6 @@ try :
 	graphstr = graph_file.read()
 	espn_graph = read(graphstr)
 except IOError:
-	print "Could not read graph file"
 	espn_graph = digraph( )
 
 #ID->URL for each node in espn_graph. 
@@ -494,7 +492,7 @@ if roster_queue.empty():
 if len(grand_set) is 0:
 	grand_set.add(SEED_URL)
 	_docID = assign_docID(SEED_URL)
-	espn_graph.add_node(_docID)
+	espn_graph.add_node(unicode(_docID))
 
 server = Queue_server('localhost',LISTEN_PORT)
 

@@ -2,27 +2,58 @@
 
 import socket, threading
 from datetime import datetime
+from traceback import print_exc
 from time import time
 import Queue
 import pickle
+import re
 
 from pygraph.classes.digraph import digraph
 from pygraph.readwrite.markup import write, read
 
-REVISIT_TIMEOUT = 900		#Time-out (in seconds) to reattempt a failed crawl.
+REVISIT_TIMEOUT = 60		#Time-out (in seconds) to reattempt a failed crawl.
 CRAWLER_TIMEOUT = 1800 	#Time-out after which crawler is assumed dead.
 DISK_SAVE_INTERVAL = 60 #Interval after which important data is saved to disk.
 MAX_TIMEOUTS = 1 
 
 LISTEN_PORT = 10000
 
-ROSTER_FILE = "qdata/roster_file"
-FAILED_FILE = "qdata/failed_file"
-VISITED_FILE = "qdata/visited_file"
-GRAND_FILE = "qdata/grand_file"
+ROSTER_FILE = "qdata/roster"
+FAILED_FILE = "qdata/failed"
+VISITED_FILE = "qdata/visited"
+GRAND_FILE = "qdata/grand"
+URL_DOCID_FILE = "qdata/url_docID"
+DOCID_URL_FILE = "qdata/docID_url"
 GRAPH_FILE = "qdata/espn_graph.xml"
+ITEM_FILE = "qdata/item_nos"
 
 SEED_URL = "http://www.espnstar.com/football/"
+
+#The next docID that will be assigned.
+next_docID = 0
+
+roster_lock = threading.Lock()
+failed_lock = threading.Lock()
+grand_lock = threading.Lock()
+graph_lock = threading.Lock()
+docID_maps_lock = threading.Lock()
+item_nos_lock = threading.Lock()
+
+item_regex = re.compile(r'/(item)([0-9]*)/')
+
+#Assigns a docID to given URL. Adds entries to the docID->url and url->docID
+#maps. Returns the docID that was assigned.
+def assign_docID(url):
+	global next_docID 
+
+	docID_maps_lock.acquire()
+	url_docID_map[url] = next_docID
+	docID_url_map[next_docID] = url
+
+	next_docID += 1
+	docID_url_map['next_docID'] = next_docID
+	docID_maps_lock.release()
+	return next_docID - 1
 
 def restore_queue_from_file(queue_file_name):
 	queue = Queue.PriorityQueue()
@@ -33,18 +64,19 @@ def restore_queue_from_file(queue_file_name):
 	except IOError:
 		return (queue, queue_dict)
 
-	queue_dict = pickle.load(queue_file)
+	try : 
+		queue_dict = pickle.load(queue_file)
 	
-	if queue_file_name is ROSTER_FILE :
-		for key in queue_dict.keys():
-			depth, parent = queue_dict[key]
-			queue.put( (depth, parent, key)  )
-	elif queue_file_name is FAILED_FILE:
-		for key in queue_dict.keys():
-			depth, parent, timestamp = queue_dict[key]
-			queue.put( (depth, parent, key, timestamp) )
-	
-	queue_file.close()
+		if queue_file_name is ROSTER_FILE :
+			for key in queue_dict.keys():
+				depth, parent = queue_dict[key]
+				queue.put( (depth, parent, key)  )
+		elif queue_file_name is FAILED_FILE:
+			for key in queue_dict.keys():
+				depth, parent, timestamp = queue_dict[key]
+				queue.put( (depth, parent, key, timestamp) )
+	except : 
+		queue_file.close()
 	return (queue, queue_dict)
 
 def restore_list_from_file(set_file_name):
@@ -74,17 +106,42 @@ class Logger(threading.Thread):
 
 def write_to_disk(last_save_time):
 	if time() - last_save_time > DISK_SAVE_INTERVAL:
-		grand_file = open( GRAND_FILE, "w" )
-		failed_file = open( FAILED_FILE, "w" )
-		roster_file = open( ROSTER_FILE, "w" )
-		visited_file = open( VISITED_FILE, "w" )
-		graph_file = open( GRAPH_FILE, "w" )
+		try : 
+			grand_file = open( GRAND_FILE, "w" )
+			failed_file = open( FAILED_FILE, "w" )
+			roster_file = open( ROSTER_FILE, "w" )
+			visited_file = open( VISITED_FILE, "w" )
+			url_docID_file = open( URL_DOCID_FILE, "w" )
+			docID_url_file = open( DOCID_URL_FILE, "w" )
+		except : 
+			print_exc()
 
-		pickle.dump(roster_dict, roster_file)
-		pickle.dump(failed_dict, failed_file)
+		try : 
+			roster_lock.acquire()
+			pickle.dump(roster_dict, roster_file)
+			roster_lock.release()
 
-		graph_xml_str = write( espn_graph )
-		graph_file.write( graph_xml_str )
+			failed_lock.acquire()
+			pickle.dump(failed_dict, failed_file)
+			failed_lock.release()
+
+			docID_maps_lock.acquire()
+			pickle.dump( url_docID_map, url_docID_file )
+			pickle.dump( docID_url_map, docID_url_file ) 
+			docID_maps_lock.release()
+		except : 
+			print_exc()
+
+		try : 
+			graph_file = open( GRAPH_FILE, "w" )
+
+			graph_lock.acquire()
+			graph_xml_str = write( espn_graph )
+			graph_lock.release()
+
+			graph_file.write( graph_xml_str )
+		except : 
+			print_exc()
 
 		for url in visited_list:
 			visited_file.write(url + "\n")
@@ -164,20 +221,19 @@ class ClientHandler():
 	def handle_ack( self, ack, url_info ):
 		depth, url, parent_url, url_type = url_info['depth'], url_info['url'],\
 											 								url_info['parent'], url_info['type']
-		log_msg = url
+		log_msg = "-" 
+
+		failed_lock.acquire()
 
 		if ack[0] == "s":
 			log_msg += " (Complete)"
 			self.print_log( log_msg ) 
 			visited_list.add(url.strip())
 
+			#Since URL was crawled successfully, removed it from the failed list.
 			if url_type == "failed":
+				print url_info
 				failed_dict.pop(url)
-
-			#Add new node to graph.
-			self.add_new_node( url )
-			if parent_url is not "root":
-				self.add_new_edge( parent_url, url )
 		
 		#If ack indicates a crawl which failed due to HTTP reasons.
 		elif ack[0] == "f":
@@ -187,9 +243,30 @@ class ClientHandler():
 			#If the crawl failed, we add it to the failed queue as well
 			#as the failed list.
 			if not failed_dict.has_key(url):
+				print "Putting " + url + " in failed queue."
 				failed_queue.put( (depth, parent_url, url, time() ) )
 				failed_dict[url] = (depth, parent_url, time() )
 
+		failed_lock.release()
+
+	#Rudimentary duplicate checking. For espnstar.com/football, all news
+	#URLs are of the form item<num>/<title>. 
+	#In this function, we check the item<num> part of the URL against a 
+	#list of seen item numbers (couldn't resist). 
+	#Returns True if already seen, False otherwise
+	def is_dup(self, url):
+		re_obj = item_regex.search(url)
+
+		if re_obj:
+			item, number = re_obj.groups()
+			number = int(number)
+			if number in item_nos_set:
+				return True
+			else:
+				return False
+		else:	#Well, we really dont know in this case...
+			return False
+	
 	#Gets next URL to be crawled.
 	#Returns (depth, url, url_type) where,
 	#depth -> Depth of URL in the BFS tree.
@@ -213,6 +290,7 @@ class ClientHandler():
 				timestamp = failed_url_info[3]
 
 				if time() - timestamp > REVISIT_TIMEOUT:
+					print "From failed"
 					depth = failed_url_info[0]
 					url = failed_url_info[1]
 					parent_url = failed_url_info[2]
@@ -223,20 +301,19 @@ class ClientHandler():
 			except Queue.Empty:
 				pass
 
-			if not url:
+			if len(url) == 0:
 				try:  
+					print "From roster"
 					url_info = roster_queue.get_nowait()
 					depth, parent_url, url = url_info
 					url_type = "roster"
 				except Queue.Empty:
 					pass
 
-		if url_type == "failed":
-			print "This URL failed before " + url 
-		elif url_type == "roster":
-			print "This is an unvisited URL " + url
 		url_info = {'depth' : depth, 'url' : url, 'parent' : parent_url,\
 								'type' : url_type}
+		print "Sent to crawler"
+		print str(url_info)
 		return url_info 
 
 	#Parse response from crawler. Takes depth, url, url_type arguments for
@@ -252,34 +329,39 @@ class ClientHandler():
 
 		msgs = msgs[1:]
 		
+		grand_lock.acquire()
+		roster_lock.acquire()
+		failed_lock.acquire()
+		graph_lock.acquire()
+
+		p_docID = url_docID_map[new_parent_url]
+
 		for msg in msgs:
 			if msg:
 				depth_end = msg.index('\1')
 				depth = int(msg[:depth_end])
 				url = msg[depth_end+1:].strip()
 
-				if url not in grand_list:
+				if url not in grand_list and not self.is_dup(url):
 					grand_list.add( url )
+					docID = assign_docID( url )
+					espn_graph.add_node(docID)	
+				else:
+					docID = url_docID_map[url]
 
-				if url not in visited_list and not roster_dict.has_key(url):
+				#Add new node and edge to graph.
+				if not espn_graph.has_edge([p_docID, docID]):
+					espn_graph.add_edge([p_docID, docID])
+
+				if url not in visited_list and not roster_dict.has_key(url)\
+						and not failed_dict.has_key(url):
 					roster_queue.put( (depth, new_parent_url, url), True )
 					roster_dict[url] = (depth, new_parent_url)
 	
-	def add_new_node( self, url ):
-		if not url_id_map.has_key(url):
-			node_id = id_url_map['next_id']
-			id_url_map['next_id'] += 1
-
-			id_url_map[node_id] = url
-			url_id_map[url] = node_id
-
-			espn_graph.add_node(node_id)
-
-	def add_new_edge(self, base_url, url):
-		base_node_id = url_id_map[base_url]
-
-		url_node_id = url_id_map[url]
-		espn_graph.add_edge([base_node_id, url_node_id])
+		grand_lock.release()
+		roster_lock.release()
+		failed_lock.release()
+		graph_lock.release()
 
 	def start(self):
 		self.print_log( "--------------------------" )
@@ -410,6 +492,16 @@ visited_list = restore_list_from_file( VISITED_FILE )
 #Grand list of URLs i.e. URLs known to exist.
 grand_list = restore_list_from_file( GRAND_FILE )
 
+item_nos_set = set([])
+try :
+	item_file = open( ITEM_FILE, "r")
+	str_items = item_file.read().split('\n')
+	for str_item in str_items:
+		item_no = int(str_item)
+		item_nos_set.add(item_no)
+except IOError:
+	pass 
+
 #ESPN graph of URLs crawled. Made from visited_list.
 #Read graph from file.
 try :
@@ -421,24 +513,26 @@ except IOError:
 
 #ID->URL for each node in espn_graph. 
 try :
-	id_url_file = open("id_url_map", "r")
-	id_url_map = pickle.load(url_id_file, 2)
-	node_id = id_url_map['latest_id']
+	docID_url_file = open(DOCID_URL_FILE, "r")
+	docID_url_map = pickle.load(docID_url_file)
+	node_id = docID_url_map['latest_id']
 except IOError:
-	id_url_map = {'next_id' : 1}
+	docID_url_map = {'next_id' : 1}
 
 #URL->ID for each node in espn_graph
 try :
-	url_id_file = open("url_id_map", "r")
-	url_id_map = pickle.load(url_id_file, 2)
+	url_docID_file = open(URL_DOCID_FILE, "r")
+	url_docID_map = pickle.load(url_docID_file)
 except IOError:
-	url_id_map = {}
+	url_docID_map = {}
 
 if roster_queue.empty():
 	roster_queue.put( (0, "root", SEED_URL) )		
 
 if len(grand_list) is 0:
 	grand_list.add(SEED_URL)
+	_docID = assign_docID(SEED_URL)
+	espn_graph.add_node(_docID)
 
 server = Queue_server('localhost',LISTEN_PORT)
 

@@ -232,7 +232,6 @@ class ClientHandler():
 
 			#Since URL was crawled successfully, removed it from the failed list.
 			if url_type == "failed":
-				print url_info
 				failed_dict.pop(url)
 		
 		#If ack indicates a crawl which failed due to HTTP reasons.
@@ -243,8 +242,7 @@ class ClientHandler():
 			#If the crawl failed, we add it to the failed queue as well
 			#as the failed list.
 			if not failed_dict.has_key(url):
-				print "Putting " + url + " in failed queue."
-				failed_queue.put( (depth, parent_url, url, time() ) )
+				failed_queue.put( (depth, url, parent_url, time() ) )
 				failed_dict[url] = (depth, parent_url, time() )
 
 		failed_lock.release()
@@ -312,7 +310,6 @@ class ClientHandler():
 
 		url_info = {'depth' : depth, 'url' : url, 'parent' : parent_url,\
 								'type' : url_type}
-		print "Sent to crawler"
 		print str(url_info)
 		return url_info 
 
@@ -515,9 +512,9 @@ except IOError:
 try :
 	docID_url_file = open(DOCID_URL_FILE, "r")
 	docID_url_map = pickle.load(docID_url_file)
-	node_id = docID_url_map['latest_id']
+	node_id = docID_url_map['next_docID']
 except IOError:
-	docID_url_map = {'next_id' : 1}
+	docID_url_map = {'next_docID' : 1}
 
 #URL->ID for each node in espn_graph
 try :

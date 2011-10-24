@@ -13,29 +13,23 @@ from pygraph.classes.digraph import digraph
 from pygraph.readwrite.markup import write, read
 
 REVISIT_TIMEOUT = 60		#Time-out (in seconds) to reattempt a failed crawl.
-CRAWLER_TIMEOUT = 1800 	#Time-out after which crawler is assumed dead.
-DISK_SAVE_INTERVAL = 10 #Interval after which important data is saved to disk.
-CLIENT_EXIT_TIMEOUT = 1.0 #If queue server shuts down for any reason, we wait for
-											  #this many seconds before shutting down the connection 
-												#forcefully.
+CRAWLER_TIMEOUT = 0.5 		#Time-out after which crawler is assumed dead.
+DISK_SAVE_INTERVAL = 60 #Interval after which important data is saved to disk.
 
 LISTEN_PORT = 10000
 
 SEED_URL = "http://www.espnstar.com/football/"
-
-#The next docID that will be assigned.
-next_docID = 0
 
 item_regex = re.compile(r'/(item)([0-9]*)/')
 
 #Assigns a docID to given URL. Adds entries to the docID->url and url->docID
 #maps. Returns the docID that was assigned.
 def assign_docID(url):
-	global next_docID 
+	next_docID = docID_url_map['next_docID']
 
 	acquire_lock(["docID_url", "url_docID"])
-	url_docID_map[url] = next_docID
-	docID_url_map[next_docID] = url
+	url_docID_map[url] = unicode(next_docID)
+	docID_url_map[unicode(next_docID)] = url
 
 	next_docID += 1
 	docID_url_map['next_docID'] = next_docID
@@ -60,16 +54,19 @@ def restore_queue_from_file(queue_file_name):
 	try : 
 		queue_dict = pickle.load(queue_file)
 	
-		if queue_file_name is ROSTER_FILE :
+		if queue_file_name is file_names["roster"] :
 			for key in queue_dict.keys():
 				depth, parent = queue_dict[key]
 				queue.put( (depth, parent, key)  )
-		elif queue_file_name is FAILED_FILE:
+		elif queue_file_name is file_names["failed"]:
 			for key in queue_dict.keys():
 				depth, parent, timestamp = queue_dict[key]
 				queue.put( (depth, parent, key, timestamp) )
 	except : 
+		print_exc()
+	finally :
 		queue_file.close()
+
 	return (queue, queue_dict)
 
 def restore_list_from_file(set_file_name):
@@ -183,6 +180,7 @@ class ClientHandler():
 		except : 
 			excName = exc_info()[0].__name__
 			self.handle_socket_error( excName ) 
+			self.client.close()
 			exit(-1)	#Thread exit. Connection already dead, so no cleanup required. 
 
 	def send_msg(self, msg, delim):
@@ -199,7 +197,8 @@ class ClientHandler():
 		except :
 			excName = exc_info()[0].__name__
 			self.handle_socket_error( excName ) 
-			exit(-1)	#Thread exit. Connection already dead, so no cleanup required. 
+			self.client.close()
+			exit(-1)	#Thread exit. 
 
 	#If connection fails for any reason, we restore the URL back to the failed
 	#queue or roster queue as the case may be.
@@ -336,16 +335,14 @@ class ClientHandler():
 				if url not in grand_set and not self.is_dup(url):
 					grand_set.add( url )
 					docID = assign_docID( url )
-					espn_graph.add_node(docID)	
+					espn_graph.add_node(unicode(docID))	
 				else:
 					docID = url_docID_map[url]
 
 				#Add new node and edge to graph.
-#				print "Adding edge from " + docID_url_map[p_docID] + " (" +\
-#				str(p_docID)\
-#				+ ") to " + docID_url_map[docID] + " (" + str(docID) + ")"
-				if not espn_graph.has_edge([p_docID, docID]) and p_docID != docID:
-					espn_graph.add_edge([p_docID, docID])
+				if not espn_graph.has_edge([unicode(p_docID), unicode(docID)])\
+						and p_docID != docID:
+					espn_graph.add_edge([unicode(p_docID), unicode(docID)])
 
 				if url not in visited_set and not roster_dict.has_key(url)\
 						and not failed_dict.has_key(url):
@@ -474,15 +471,15 @@ try :
 	graphstr = graph_file.read()
 	espn_graph = read(graphstr)
 except IOError:
+	print "Could not read graph file"
 	espn_graph = digraph( )
 
 #ID->URL for each node in espn_graph. 
 try :
 	docID_url_file = open(file_names["docID_url"], "r")
 	docID_url_map = pickle.load(docID_url_file)
-	next_docID = docID_url_map['next_docID']
 except IOError:
-	docID_url_map = {'next_docID' : 1}
+	docID_url_map = {'next_docID' : 0}
 
 #URL->ID for each node in espn_graph
 try :

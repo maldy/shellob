@@ -28,12 +28,14 @@ from mechanize import Browser, HTTPError, URLError, BrowserStateError
 import pymongo
 import lxml.html
 from lepl.apps._test.rfc3696 import HttpUrl
+import pickle
 
-mongo_host = 'localhost'
-mongo_port = 27017
+#mongo_host = 'localhost'
+#mongo_port = 27017
 
 espn_regex = re.compile(r'http://(www.){,1}espnstar.com/football/')
-bad_regex = re.compile(r'/fixtures/{,1}|/URL/{,1}|/galleries/{,1}|/videos/{,1}|/[0-9]/{,1}')
+bad_regex =\
+re.compile(r'/fixtures/{,1}|/URL/{,1}|/galleries/{,1}|/videos/{,1}|/[0-9]/{,1}|/matchcast/{,1}')
 
 PORT = 10000
 URL_TIMEOUT = 600		#Time-out to wait for page to load
@@ -144,19 +146,19 @@ class Crawler():
 
 			crawler_msg = crawler_ack + "*"
 			depth += 1	#All links in this page are at lower depth.
-
-			if response and len(links_found) > 0 and crawler_ack == 's':
-				html = response.read()
-				(title, body) = parse_doc(html)
-
-				#URL normalization. End all URLs with a '/'.
-				if url[-1] != "/":
-					url += "/"
-
-				post = {"url": url, "crawl_time": datetime.utcnow(), "title" : title,\
-						    "body" : body}
-
-				db.pages.update({"url": url},post, True)
+			
+#			if response and len(links_found) > 0 and crawler_ack == 's':
+#				html = response.read()
+#				(title, body) = parse_doc(html)
+#
+#				#URL normalization. End all URLs with a '/'.
+#				if url[-1] != "/":
+#					url += "/"
+#
+#				post = {"url": url, "crawl_time": datetime.utcnow(), "title" : title,\
+#							"body" : body}
+#
+#				db.pages.update({"url": url},post, True)
 
 			for link in links_found:
 				if espn_regex.search(link.absolute_url) and not \
@@ -169,6 +171,8 @@ class Crawler():
 					url_msg = str(depth) + '\1' + link.absolute_url + '*'
 					crawler_msg += url_msg
 		
+			db_post = pickle.dumps(post)
+			crawler_msg += '\2' + db_post
 			bytes_sent = self.send_msg( crawler_msg, '\0' )
 
 		self.sock.close()

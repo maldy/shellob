@@ -263,7 +263,13 @@ class ClientHandler():
 		else:
 			self.print_log("Socket error")
 
-	def handle_ack( self, ack, db_post ):
+	def convert_to_db_post( self, post ):
+		fragments = post.split('\4')
+		db_post = {"url" : fragments[0], "crawl_time" : fragments[1],\
+						"title" : fragments[2], "body" : fragments[3] }
+		return db_post
+
+	def handle_ack( self, ack, post ):
 		depth, url, parent_url = self.unpack_url_info()
 
 		log_msg = "-" 
@@ -273,8 +279,8 @@ class ClientHandler():
 			self.print_log( log_msg ) 
 			visited_set.add(url.strip())
 
-			db_post = pickle.loads(db_post)
-			corpus_db.pages.update({"url": url}, db_post, True)
+			db_post = self.convert_to_db_post( post )
+			corpus_db.pages.update( {"url": url}, db_post, True )
 			corpus_connection.end_request()
 
 		#If ack indicates a crawl which failed due to HTTP reasons.
@@ -364,12 +370,12 @@ class ClientHandler():
 	def parse_crawler_messages(self, response ):
 		msgs_post = response.split("\2")
 		msgs = msgs_post[0]
-		db_post = msgs_post[1]
+		post = msgs_post[1]
 
 		msgs = msgs.split("*")
 		ack = msgs[0]
 
-		self.handle_ack( ack, db_post )
+		self.handle_ack( ack, post )
 		depth, url, parent_url = self.unpack_url_info()
 		url = unicode(url)
 		parent_url = unicode(url)
@@ -552,7 +558,7 @@ except :
 #Cleanup code.
 for thread in client_threads:
 	thread.end()
-	thread.join()
+	thread.join(DISK_SAVE_INTERVAL)
 	print "Terminated " + thread.getName()
 
 logger.end()

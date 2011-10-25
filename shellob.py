@@ -91,7 +91,6 @@ class Crawler():
 
 		while True:
 			# grab the next url off the queue server
-			buf_left = 10000 
 			response = ""
 
 			print "Waiting for queue server"
@@ -150,8 +149,8 @@ class Crawler():
 				if url[-1] != "/":
 					url += u'/'
 
-				post = {"url": url, "crawl_time": datetime.utcnow(), "title" : title,\
-							"body" : body}
+				post = url + '\4' + str(datetime.utcnow()) + '\4' + title + '\4' +\
+								body
 
 			for link in links_found:
 				if espn_regex.search(link.absolute_url) and not \
@@ -164,8 +163,7 @@ class Crawler():
 					url_msg = str(depth) + '\1' + link.absolute_url + '*'
 					crawler_msg += url_msg
 		
-			db_post = pickle.dumps(post)
-			crawler_msg += '\2' + db_post
+			crawler_msg += '\2' + post
 			bytes_sent = self.send_msg( crawler_msg, '\0' )
 
 		self.sock.close()

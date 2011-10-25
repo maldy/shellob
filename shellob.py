@@ -25,13 +25,9 @@ import errno
 
 # stuff you'll have to install - all available with python setuptools
 from mechanize import Browser, HTTPError, URLError, BrowserStateError
-import pymongo
 import lxml.html
 from lepl.apps._test.rfc3696 import HttpUrl
 import pickle
-
-#mongo_host = 'localhost'
-#mongo_port = 27017
 
 espn_regex = re.compile(r'http://(www.){,1}espnstar.com/football/')
 bad_regex =\
@@ -91,8 +87,6 @@ class Crawler():
 
 	def crawl(self):
 
-		connection = pymongo.Connection(mongo_host, mongo_port)
-		db = connection.espn_corpus
 		valid_url = HttpUrl()
 
 		while True:
@@ -147,18 +141,17 @@ class Crawler():
 			crawler_msg = crawler_ack + "*"
 			depth += 1	#All links in this page are at lower depth.
 			
-#			if response and len(links_found) > 0 and crawler_ack == 's':
-#				html = response.read()
-#				(title, body) = parse_doc(html)
-#
-#				#URL normalization. End all URLs with a '/'.
-#				if url[-1] != "/":
-#					url += "/"
-#
-#				post = {"url": url, "crawl_time": datetime.utcnow(), "title" : title,\
-#							"body" : body}
-#
-#				db.pages.update({"url": url},post, True)
+			#Prepare the db post.
+			if response and len(links_found) > 0 and crawler_ack == 's':
+				html = response.read()
+				(title, body) = parse_doc(html)
+
+				#URL normalization. End all URLs with a '/'.
+				if url[-1] != "/":
+					url += u'/'
+
+				post = {"url": url, "crawl_time": datetime.utcnow(), "title" : title,\
+							"body" : body}
 
 			for link in links_found:
 				if espn_regex.search(link.absolute_url) and not \
@@ -176,7 +169,6 @@ class Crawler():
 			bytes_sent = self.send_msg( crawler_msg, '\0' )
 
 		self.sock.close()
-		connection.disconnect()
 	
 def main():
 	# thread and unleash shellob onto the unsuspecting site. Amok!

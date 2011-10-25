@@ -70,11 +70,12 @@ class Crawler():
 		data = ""
 		while True:
 			recv_data = self.sock.recv(buf_len)
-			data += recv_data
+			data += recv_data.decode('utf-8')
 			if delim in data:
 				return data[:-1]
 
 	def send_msg(self, msg, delim):
+		msg = msg.encode('utf-8')
 		msg_len = len(msg)
 		bytes_sent = 0
 
@@ -86,14 +87,20 @@ class Crawler():
 		return bytes_sent 
 
 	def crawl(self):
-
 		valid_url = HttpUrl()
+		crawler_msg = ""
+		crawler_ack = ""
+		response = ""
+		post = {}
+		links_found = []
+		title = ""
+		body = ""
+		html = ""
+		url_msg = ""
+		url = ""
 
 		while True:
 			# grab the next url off the queue server
-			response = ""
-
-			print "Waiting for queue server"
 			url_msg = self.recv_msg( 4096, '\0')
 
 			if url_msg == "":
@@ -114,6 +121,7 @@ class Crawler():
 				
 				if response:
 					crawler_ack = 's'
+					print "Finished fetch"
 				else:
 					print "Crawl failed - Timeout"
 					crawler_ack = 'f'
@@ -126,8 +134,7 @@ class Crawler():
 				print "Crawl failed - Could not open page"
 				crawler_ack = 'f'
 					
-			links_found = []
-			if crawler_ack is 's':
+			if crawler_ack == 's':
 				try:
 					links_found = list( self.br.links() )
 				except BrowserStateError:
@@ -146,19 +153,20 @@ class Crawler():
 				(title, body) = parse_doc(html)
 
 				#URL normalization. End all URLs with a '/'.
-				if url[-1] != "/":
+				if url[-1] != u'/':
 					url += u'/'
 
 				post = url + '\4' + str(datetime.utcnow()) + '\4' + title + '\4' +\
 								body
 
 			for link in links_found:
-				if espn_regex.search(link.absolute_url) and not \
-						bad_regex.search(link.absolute_url) and \
-						valid_url(link.absolute_url) is True:		
+				url = link.absolute_url.encode('utf-8')
+				if espn_regex.search(url) and not \
+						bad_regex.search(url) and \
+						valid_url(url) is True:		
 					
-					if link.absolute_url[-1] is not '/':
-						link.absolute_url += '/'
+					if url[-1] is not u'/':
+						url += u'/'
 
 					url_msg = str(depth) + '\1' + link.absolute_url + '*'
 					crawler_msg += url_msg

@@ -14,7 +14,7 @@ from pygraph.classes.digraph import digraph
 
 REVISIT_TIMEOUT = 900			#Time-out (in seconds) to reattempt a failed crawl.
 CRAWLER_TIMEOUT = 900 		#Time-out after which crawler is assumed dead.
-DISK_SAVE_INTERVAL = 1200 #Interval after which important data is saved to disk.
+TERMINATION_WAIT = 120 #Interval after which important data is saved to disk.
 
 LISTEN_PORT = 10000
 
@@ -25,8 +25,12 @@ item_regex = re.compile(r'/(item)([0-9]*)/')
 #Set up connection to corpus database.
 corpus_connection = pymongo.Connection()
 corpus_db = corpus_connection.espn_corpus
+pages_db = corpus_db.pages
 tempID_db = corpus_db.tempIDs
 graph_db = corpus_db.graph
+roster_db = corpus_db.roster
+failed_db = corpus_db.failed
+items_db = corpus_db.items
 
 class DbEmpty(Exception):
 	def __init__(self):
@@ -38,21 +42,20 @@ class DbEmpty(Exception):
 #Assigns a docID to given URL. Adds entries to the docID->url and url->docID
 #maps. Returns the docID that was assigned.
 def assign_docID(url):
-	next_docID = docID_url_map[u'next_docID']
+	next_docID_key = u'next_docID'
+	next_docID = int(url_docID_map[u'next_docID'])
 
-	acquire_lock(["docID_url", "url_docID"])
 	url_docID_map[unicode(url)] = unicode(next_docID)
 	docID_url_map[unicode(next_docID)] = unicode(url)
 
-	docID_url_map[u'next_docID'] = next_docID + 1
+	url_docID_map[next_docID_key] = unicode(next_docID + 1)
 
 	#Save docID->url maps to db.
 	tempID_db.update({"url" : url}, {"url" : url, "docID" : next_docID}, True)
-	tempID_db.update({"url" : "next_docID"}, {"url" : "next", "docID" : next_docID + 1},\
-								True)
+	tempID_db.update({"url" : "next_docID"},\
+			{"url" : "next_docID", "docID" : next_docID + 1}, True)
 	corpus_connection.end_request()
 
-	release_lock(["docID_url", "url_docID"])
 	return next_docID 
 
 def acquire_lock(lock_names):
@@ -61,119 +64,73 @@ def acquire_lock(lock_names):
 def release_lock(lock_names):
 	[locks[name].release() for name in lock_names]
 
-def restore_queue(queue_file_name):
-	queue = Queue.PriorityQueue()
-	queue_dict = {}
+def unpack_db_entry( entry, keys ):
+	ret = []
+	for key in keys:
+		ret.append( entry[key] )
 
-	queue_file = open(queue_file_name, "r")
-
-	try : 
-		queue_dict = pickle.load(queue_file)
-	
-		if queue_file_name is file_names["roster"] :
-			for key in queue_dict.keys():
-				depth, parent = queue_dict[key]
-				queue.put( (depth, parent, key)  )
-		elif queue_file_name is file_names["failed"]:
-			for key in queue_dict.keys():
-				depth, parent, timestamp = queue_dict[key]
-				queue.put( (depth, parent, key, timestamp) )
-	finally :
-		queue_file.close()
-
-	return (queue, queue_dict)
-
-def restore_set(set_name):
-	result = set([])
-
-	set_file = open(file_names[set_name], "r")
-	strings = set_file.read().split('\n')
-	strings.remove('')
-	
-	if set_name == "item_nos":
-		[result.add(int(item_no)) for item_no in strings]
-	else:
-		[result.add(unicode(string)) for string in strings]
-
-	set_file.close()
-	return result 
+	return tuple(ret)
 
 #Restores graph, URL->ID and ID->URL maps
 def restore_from_db():
-	docID_url_map = {}
-	url_docID_map = {}
-	web_graph = digraph()
-
 	docID_cursor = tempID_db.find()	
 	edge_cursor = graph_db.find()
+	visited_cursor = pages_db.find({}, {"url" : True})
+	roster_cursor = roster_db.find()
+	failed_cursor = failed_db.find()
+	items_cursor = items_db.find()
 
-	#For some reason, no graph data in the db.
-	if edge_cursor.count() == 0 or docID_cursor.count() == 0:
+	if docID_cursor.count() == 0 or edge_cursor.count() == 0 or\
+			visited_cursor.count() == 0 or roster_cursor.count() == 0:
+
+		roster_queue.put( (0, "root", SEED_URL) )		
+		roster_dict[SEED_URL] = (0, "root")
+		grand_set.add(SEED_URL)
+		_docID = assign_docID(SEED_URL)
+		web_graph.add_node(unicode(_docID))
+
 		raise DbEmpty()
 
-	print edge_cursor.count()
-	i = 0	
-	while i < docID_cursor.count():
-		docID_url_entry = docID_cursor[i]
-		url = docID_url_entry['url']
-		docID = unicode(docID_url_entry['docID'])
-
-		docID_url_map[docID] = url 
+	#Filling up docID_url_map, url_docID_map, grand_set
+	for entry in docID_cursor[:]:
+		url,docID = unpack_db_entry( entry, ["url", "docID"] )
+		docID = unicode(docID)
 		url_docID_map[url] = docID
-		web_graph.add_node( docID )
-		i += 1
+		
+		if url != u'next_docID':
+			grand_set.add(url)
+			docID_url_map[docID] = url 
+			web_graph.add_node( docID )
 
-	i = 0
-	while i < edge_cursor.count():
-		edge_entry = edge_cursor[i]
-		from_docID = edge_entry['from']
-		to_docID = edge_entry['to']
-
+	#Filling up graph.
+	for entry in edge_cursor[:]:
+		from_docID, to_docID = unpack_db_entry( entry, ["from", "to"] )
 		web_graph.add_edge( [from_docID, to_docID] )
-		i += 1
 
-	return (web_graph, url_docID_map, docID_url_map)
+	#Filling up roster, failed, visited. 
+	for entry in roster_cursor[:]:
+		depth, parent, url = unpack_db_entry( entry, ["depth", "parent", "url"] ) 
+		roster_queue.put( (int(depth), parent, url) )		
+		roster_dict[url] = ( int(depth), parent )
 
-class Logger(threading.Thread):
-	def __init__(self, start_time):
-		self.start_time = start_time
-		self.continue_logging = True
-		threading.Thread.__init__(self)
+	for entry in failed_cursor[:]:
+		depth, parent, url, timestamp = unpack_db_entry( entry,\
+								["depth", "parent", "url", "timestamp"] )
+		failed_queue.add( (int(depth), parent_url, url, timestamp) )
+		failed_dict[url] = ( int(depth), parent, timestamp )
 
-	def run(self):	
-		last_save_time = self.start_time
-		while self.continue_logging:
-			if time() - last_save_time > DISK_SAVE_INTERVAL:
-				write_to_disk()
-				last_save_time = time()
+	for entry in visited_cursor[:]:
+		url = unpack_db_entry( entry, ["url"] )
+		visited_set.add( url )
+							
+	#Filling up set of news items.
+	for entry in items_cursor[:]:
+		item_no = unpack_db_entry( entry, ["number"] )
+		item_nos_set.add(item_no)
 
-	def end(self):
-		self.continue_logging = False
-
-#Use appropriate write method for data type.
-def write_data(var_string): 
-	try : 
-		file_name = file_names[var_string]
-	except KeyError:
-		return
-
-	fd = open( file_name, "w" )
-
-	data = globals()[string_var_map[var_string]]
-	acquire_lock([var_string])
-
-	if type(data).__name__ == "dict":
-		pickle.dump(data, fd)
-	elif type(data).__name__ == "set":
-		[fd.write(str(item) + "\n") for item in data]
-
-	release_lock([var_string])
-	fd.close()
-
-def write_to_disk():
-	[write_data(var_string) for var_string in var_strings]
-
-	print "Wrote to disk"
+	return ( web_graph, url_docID_map, docID_url_map, visited_set,\
+				failed_set, grand_set, item_nos_set, roster_dict, \
+				roster_queue, failed_dict, failed_queue )
 
 class HandlerWrapper(threading.Thread):
 	def __init__(self, client,client_id, conn_addr):
@@ -224,7 +181,7 @@ class ClientHandler():
 		try : 
 			while True:
 				recv_data = self.client.recv(buf_len)
-				data += recv_data
+				data += recv_data.decode('utf-8')
 				if delim in data:
 					return data[:-1]
 		except : 
@@ -234,6 +191,7 @@ class ClientHandler():
 			exit(-1)	#Thread exit. Connection already dead, so no cleanup required. 
 
 	def send_msg(self, msg, delim):
+		msg = msg.encode('utf-8')
 		msg_len = len(msg)
 		bytes_sent = 0
 
@@ -258,6 +216,10 @@ class ClientHandler():
 		failed_queue.put( (depth, parent_url, url, time()) )
 		failed_dict[url] = ( depth, parent_url, time() )
 
+		failed_db.update( {"url" : url}, {"url" : url, "depth" : depth,\
+											"parent" : parent_url, "timestamp" : time() }, True )
+		corpus_connection.end_request()
+
 		if excName == "timeout":
 			self.print_log("Timed out")
 		else:
@@ -280,7 +242,7 @@ class ClientHandler():
 			visited_set.add(url.strip())
 
 			db_post = self.convert_to_db_post( post )
-			corpus_db.pages.update( {"url": url}, db_post, True )
+			pages_db.update( {"url": True}, db_post, True )
 			corpus_connection.end_request()
 
 		#If ack indicates a crawl which failed due to HTTP reasons.
@@ -290,13 +252,17 @@ class ClientHandler():
 
 			#If the crawl failed, we add it to the failed queue as well
 			#as the failed list.
-			acquire_lock(["failed"])
 
 			if not failed_dict.has_key(url):
 				failed_queue.put( (depth, url, parent_url, time() ) )
-				failed_dict[url] = ( depth, parent_url, time() )
 
-			release_lock(["failed"])
+				acquire_lock(["failed"])
+				failed_dict[url] = ( depth, parent_url, time() )
+				release_lock(["failed"])
+
+				failed_db.insert( {"url" : url, "depth" : depth,\
+										"parent" : parent_url, "timestamp" : time() }, True )
+				corpus_connection.end_request()
 
 	#Rudimentary duplicate checking. For espnstar.com/football, all news
 	#URLs are of the form item<num>/<title>. 
@@ -308,13 +274,14 @@ class ClientHandler():
 
 		if re_obj:
 			item, number = re_obj.groups()
-			number = int(number)
+			number = unicode(number)
 			if number in item_nos_set:
 				return True
 			else:
 				item_nos_set.add( number )
+				items_db.insert( {"number" : number}, True )
 				return False
-		else:	#Well, we really dont know in this case...
+		else:	#Well, we really dont know in this case if its still a duplicate...
 			return False
 	
 	#Gets next URL to be crawled.
@@ -340,9 +307,16 @@ class ClientHandler():
 			acquire_lock(["failed"])
 			if time() - timestamp > REVISIT_TIMEOUT:
 				failed_dict.pop(url)
+				failed_db.remove({"url" : url})
+				corpus_connection.end_request()
 			else:
 				failed_queue.put(failed_url_info)
 				failed_dict[url] = ( depth, parent_url, timestamp )
+
+				failed_db.insert( {"url" : url, "depth" : depth,\
+										"parent" : parent_url, "timestamp" : timestamp }, True )
+				corpus_connection.end_request()
+
 			release_lock(["failed"])
 			
 		except Queue.Empty:
@@ -356,6 +330,8 @@ class ClientHandler():
 				acquire_lock(["roster"])
 				roster_dict.pop(url)
 				release_lock(["roster"])
+				roster_db.remove({"url" : url})
+				corpus_connection.end_request()
 			except Queue.Empty:
 				pass
 
@@ -386,8 +362,6 @@ class ClientHandler():
 		
 		p_docID = unicode(url_docID_map[parent_url])
 
-		acquire_lock(["grand", "failed", "graph", "roster", "item_nos"])
-
 		for msg in msgs:
 			if msg:
 				depth_end = msg.index('\1')
@@ -399,6 +373,7 @@ class ClientHandler():
 
 				if url not in grand_set:
 					grand_set.add( url )
+
 					docID = unicode(assign_docID( url ))
 					web_graph.add_node( docID )
 				else:
@@ -416,8 +391,10 @@ class ClientHandler():
 					roster_queue.put( (depth, parent_url, url), True )
 
 					roster_dict[url] = (depth, parent_url)
+					roster_db.insert( {"url" : url, "parent" : parent_url,\
+						"depth" : depth }, True ) 
+					corpus_connection.end_request()
 	
-		release_lock(["grand", "failed", "graph", "roster", "item_nos"])
 
 	def start(self):
 		self.get_next_url()
@@ -479,7 +456,6 @@ class Queue_server():
 
 			client_id += 1
 			client_threads.append( client_thread )
-			#client_thread.daemon = True
 			client_thread.start()
 	
 client_threads = []
@@ -491,16 +467,6 @@ locks = {}
 #Create locks for shared data structures.
 for name in var_strings:
 	locks[name] = threading.Lock()
-
-file_names = { "roster" : "qdata/roster", "failed" : "qdata/failed",\
-							 "visited" : "qdata/visited", "grand" : "qdata/grand",\
-							 "item_nos" : "qdata/item_nos" }
-							
-string_var_map = {"roster" : "roster_dict", "failed" : "failed_dict",\
-		"visited" : "visited_set", "grand" : "grand_set",\
-		"url_docID" : "url_docID_map", "docID_url" : "docID_url_map",\
-		"graph" : "web_graph",\
-		"item_nos" : "item_nos_set"}
 
 #Each entry in the roster_queue is of the form ( depth, parent_url, url )
 #where "depth" is the distance from the seed URL.
@@ -515,42 +481,31 @@ string_var_map = {"roster" : "roster_dict", "failed" : "failed_dict",\
 
 #Grand list of URLs i.e. URLs known to exist.
 
-try : 
-	print "Loading data from previous crawl. Might take a few minutes..."
-	failed_queue, failed_dict = restore_queue( file_names["failed"] )
-	roster_queue, roster_dict = restore_queue( file_names["roster"] )
-	visited_set = restore_set("visited" )
-	grand_set = restore_set("grand" )
-	item_nos_set = restore_set("item_nos")
-
-	web_graph, url_docID_map, docID_url_map = restore_from_db()
-except : 
-	print_exc()
-	print "Error loading data from previous crawl. Starting afresh."
-
-	failed_queue = Queue.PriorityQueue()
-	roster_queue = Queue.PriorityQueue()
-	roster_dict = {}
-	failed_dict = {}
-	item_nos_set = set([])
+print "Loading data from previous crawl. Might take a few minutes..."
+try:
+	docID_url_map = {}
+	url_docID_map = {u'next_docID' : 0}
+	web_graph = digraph()
 	visited_set = set([])
 	grand_set = set([])
-	web_graph = digraph( )
-	docID_url_map = { u'next_docID' : 0 }
-	url_docID_map = {}
+	failed_set = set([])
+	item_nos_set = set([])
+	roster_queue = Queue.PriorityQueue()
+	failed_queue = Queue.PriorityQueue()
+	roster_dict = {}
+	failed_dict = {}
 
-	roster_queue.put( (0, "root", SEED_URL) )		
-	roster_dict[SEED_URL] = (0, "root")
-	grand_set.add(SEED_URL)
-	_docID = assign_docID(SEED_URL)
-	web_graph.add_node(unicode(_docID))
+	web_graph, url_docID_map, docID_url_map, visited_set, failed_set, \
+		grand_set, item_nos_set, roster_dict, roster_queue, failed_dict,\
+		failed_queue = restore_from_db() 
+	print "Loading complete."
+except : 
+	print "Could not load data. Starting afresh."
 
 server = Queue_server('localhost',LISTEN_PORT)
 
 try : 
-	logger = Logger(time())
-	logger.start()
-	print "Loading complete. Started server."
+	print "Starting server."
 	server.start()
 except : 
 	print "Caught termination request."
@@ -558,13 +513,8 @@ except :
 #Cleanup code.
 for thread in client_threads:
 	thread.end()
-	thread.join(DISK_SAVE_INTERVAL)
+	thread.join(TERMINATION_WAIT)
 	print "Terminated " + thread.getName()
 
-logger.end()
-logger.join()
 #Do one last log update.
-write_to_disk()
 corpus_connection.disconnect()
-print "Final write to disk"
-exit(0)

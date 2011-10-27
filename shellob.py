@@ -22,6 +22,7 @@ import re
 import socket
 from datetime import datetime 
 import errno
+import gc
 
 # stuff you'll have to install - all available with python setuptools
 from mechanize import Browser, HTTPError, URLError, BrowserStateError
@@ -53,8 +54,6 @@ def parse_doc(html_file):
 class Crawler():
 
 	def __init__(self):
-		self.br = Browser()
-		self.br.set_handle_redirect(True)
 		self.queue_server = {"host": "localhost", "port": PORT}
 		self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)	
 
@@ -88,19 +87,11 @@ class Crawler():
 
 	def crawl(self):
 		valid_url = HttpUrl()
-		crawler_msg = ""
-		crawler_ack = ""
-		response = ""
-		post = {}
-		links_found = []
-		title = ""
-		body = ""
-		html = ""
-		url_msg = ""
-		url = ""
 
 		while True:
 			# grab the next url off the queue server
+			br = Browser()
+			br.set_handle_redirect(True)
 			url_msg = self.recv_msg( 4096, '\0')
 
 			if url_msg == "":
@@ -108,20 +99,19 @@ class Crawler():
 				break
 
 			depth_end = url_msg.find('\1')
-
 			url = url_msg[depth_end+1:]
 			depth = int(url_msg[0:depth_end])
+			del(depth_end)
 	
 			print str(datetime.utcnow()) + " URL received from queue server ->" + url +\
 			" Depth : " + str(depth)
 
 			# fetch url contents (filter stuff here)
 			try : 
-				response = self.br.open(url,timeout=URL_TIMEOUT)
+				response = br.open(url,timeout=URL_TIMEOUT)
 				
 				if response:
 					crawler_ack = 's'
-					print "Finished fetch"
 				else:
 					print "Crawl failed - Timeout"
 					crawler_ack = 'f'
@@ -136,7 +126,7 @@ class Crawler():
 					
 			if crawler_ack == 's':
 				try:
-					links_found = list( self.br.links() )
+					links_found = list( br.links() )
 				except BrowserStateError:
 					print "Crawl failed - Mechanize error"
 					crawler_ack = 'd'
@@ -148,24 +138,27 @@ class Crawler():
 			depth += 1	#All links in this page are at lower depth.
 			
 			#Prepare the db post.
-			if response and len(links_found) > 0 and crawler_ack == 's':
-				html = response.read()
-				(title, body) = parse_doc(html)
+			if len(links_found) > 0 and crawler_ack == 's':
+				if response:
+					html = response.read()
+					(title, body) = parse_doc(html)
+					del(html)
 
-				#URL normalization. End all URLs with a '/'.
-				if url[-1] != u'/':
-					url += u'/'
+					#URL normalization. End all URLs with a '/'.
+					if url[-1] != u'/':
+						url += u'/'
 
-				post = url + '\4' + str(datetime.utcnow()) + '\4' + title + '\4' +\
-								body
+					post = url + '\4' + str(datetime.utcnow()) + '\4' + title + '\4' +\
+									body
 
+			del(crawler_ack)
 			for link in links_found:
 				url = link.absolute_url.encode('utf-8')
 				if espn_regex.search(url) and not \
 						bad_regex.search(url) and \
 						valid_url(url) is True:		
 					
-					if url[-1] is not u'/':
+					if url[-1] is not u'/' or url[-1] is not '/':
 						url += u'/'
 
 					url_msg = str(depth) + '\1' + link.absolute_url + '*'
@@ -173,12 +166,16 @@ class Crawler():
 		
 			crawler_msg += '\2' + post
 			bytes_sent = self.send_msg( crawler_msg, '\0' )
+			br.close()
+			del([crawler_msg, links_found, post, url_msg, response, url, br])
 
+			gc.collect()
 		self.sock.close()
 	
 def main():
 	# thread and unleash shellob onto the unsuspecting site. Amok!
 	c = Crawler()
+	#gc.set_debug(gc.DEBUG_LEAK)
 	c.crawl()
 	
 if __name__ == "__main__":

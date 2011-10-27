@@ -14,7 +14,7 @@ from pygraph.classes.digraph import digraph
 
 REVISIT_TIMEOUT = 900			#Time-out (in seconds) to reattempt a failed crawl.
 CRAWLER_TIMEOUT = 900 		#Time-out after which crawler is assumed dead.
-TERMINATION_WAIT = 120 #Interval after which important data is saved to disk.
+TERMINATION_WAIT = CRAWLER_TIMEOUT + 10 #Interval after which important data is saved to disk.
 
 LISTEN_PORT = 10000
 
@@ -24,7 +24,7 @@ item_regex = re.compile(r'/(item)([0-9]*)/')
 
 #Set up connection to corpus database.
 corpus_connection = pymongo.Connection()
-corpus_db = corpus_connection.espn_corpus
+corpus_db = corpus_connection.final_corpus
 pages_db = corpus_db.pages
 tempID_db = corpus_db.tempIDs
 graph_db = corpus_db.graph

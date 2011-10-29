@@ -21,11 +21,10 @@ import re
 
 import socket
 from datetime import datetime 
-import errno
 import gc
 
 # stuff you'll have to install - all available with python setuptools
-from mechanize import Browser, HTTPError, URLError, BrowserStateError
+import urllib2
 import lxml.html
 from lepl.apps._test.rfc3696 import HttpUrl
 import pickle
@@ -50,6 +49,17 @@ def parse_doc(html_file):
 	if div_el:
 		doc = div_el[0].text_content()
 	return (title, re.sub(r'[\r\n]', ' ', doc))
+
+def get_links(base_url, html_data):
+	html = lxml.html.fromstring(html_data)	
+	html.make_links_absolute( base_url )
+
+	link_info = html.iterlinks()
+	links = []
+	for link in link_info:
+		links.append( link[2] )
+
+	return links
 
 class Crawler():
 
@@ -86,12 +96,10 @@ class Crawler():
 		return bytes_sent 
 
 	def crawl(self):
-		valid_url = HttpUrl()
+		valid_url_check = HttpUrl()
 
 		while True:
 			# grab the next url off the queue server
-			br = Browser()
-			br.set_handle_redirect(True)
 			url_msg = self.recv_msg( 4096, '\0')
 
 			if url_msg == "":
@@ -108,41 +116,36 @@ class Crawler():
 
 			# fetch url contents (filter stuff here)
 			try : 
-				response = br.open(url,timeout=URL_TIMEOUT)
+				response = urllib2.urlopen(url,timeout=URL_TIMEOUT)
+				response_html = response.read()
+				#response.read(1)
+				response.fp._sock.recv = None
+				response.close()
 				
 				if response:
 					crawler_ack = 's'
 				else:
 					print "Crawl failed - Timeout"
 					crawler_ack = 'f'
-			except HTTPError, e: 
+			except urllib2.HTTPError: 
 				#Much internal debate on this, but "d" is the best
 				#response I believe rather than enqueuing it again and again.
 				print "Crawl failed - HTTP error"
 				crawler_ack = 'd'
-			except URLError:
+			except urllib2.URLError:
 				print "Crawl failed - Could not open page"
 				crawler_ack = 'f'
 					
 			if crawler_ack == 's':
-				try:
-					links_found = list( br.links() )
-				except BrowserStateError:
-					print "Crawl failed - Mechanize error"
-					crawler_ack = 'd'
-				except socket.timeout:
-					print "Crawl failed - links() timed out"
-					crawler_ack = 'f'
+				links_found = get_links( url, response_html ) 
 
 			crawler_msg = crawler_ack + "*"
 			depth += 1	#All links in this page are at lower depth.
 			
 			#Prepare the db post.
 			if len(links_found) > 0 and crawler_ack == 's':
-				if response:
-					html = response.read()
-					(title, body) = parse_doc(html)
-					del(html)
+				if response_html:
+					(title, body) = parse_doc(response_html)
 
 					#URL normalization. End all URLs with a '/'.
 					if url[-1] != u'/':
@@ -151,25 +154,24 @@ class Crawler():
 					post = url + '\4' + str(datetime.utcnow()) + '\4' + title + '\4' +\
 									body
 
-			del(crawler_ack)
 			for link in links_found:
-				url = link.absolute_url.encode('utf-8')
+				url = link.encode('utf-8')
+				espn_regex_match = espn_regex.search(url)
+				bad_regex_match = bad_regex.search(url) 
+				valid_url = valid_url_check(url)
 				if espn_regex.search(url) and not \
 						bad_regex.search(url) and \
-						valid_url(url) is True:		
+						valid_url == True:		
 					
-					if url[-1] is not u'/' or url[-1] is not '/':
+					if url[-1] != u'/' or url[-1] != '/':
 						url += u'/'
 
-					url_msg = str(depth) + '\1' + link.absolute_url + '*'
+					url_msg = str(depth) + '\1' + url + '*'
 					crawler_msg += url_msg
 		
 			crawler_msg += '\2' + post
 			bytes_sent = self.send_msg( crawler_msg, '\0' )
-			br.close()
-			del([crawler_msg, links_found, post, url_msg, response, url, br])
 
-			gc.collect()
 		self.sock.close()
 	
 def main():

@@ -23,16 +23,7 @@ import pymongo
 #3) Add exception handling for all of this stuff.
 class Indexer():
 	def __init__(self):
-		#Read user name and password from command line. 			
-		#Little hesitant to store details on disk until I find a generally accepted
-		#way to do so.
-		username =	raw_input("User name : ")
-		password = getpass.getpass("Password : ")
-		self.email_id = username + "@gmail.com"
-
-		self.mailbox = imaplib.IMAP4_SSL('imap.gmail.com', 993)
-		self.mailbox.login( username, password )
-		self.msg_parser = email.parser.Parser()
+		#self.msg_parser = email.parser.Parser()
 		self.db_conn = pymongo.Connection()
 		self.chat_db = self.db_conn.temp_chats
 		self.raw_chats = self.chat_db.raw_data
@@ -41,15 +32,24 @@ class Indexer():
 	#Gmail to allow IMAP access to these logs.
 	def get_chatIDs(self):
 
+		#Read user name and password from command line. 			
+		#Little hesitant to store details on disk until I find a generally accepted
+		#way to do so.
+		username =	raw_input("User name : ")
+		password = getpass.getpass("Password : ")
+		self.email_id = username + "@gmail.com"
+
+		mailbox = imaplib.IMAP4_SSL('imap.gmail.com', 993)
+		mailbox.login( username, password )
 		#The mailbox containing Chats is readonly. 
-		imap_response = self.mailbox.select( '[Gmail]/Chats', True )	
+		imap_response = mailbox.select( '[Gmail]/Chats', True )	
 		if imap_response[0] != 'OK':
 			print "Could not locate chat logs. Are you sure you have configured "+\
 						"access to the logs?"
 			return;
 
 		#Get all message IDs corresponding to chats.
-		imap_response = self.mailbox.search( '', 'ALL' )
+		imap_response = mailbox.search( '', 'ALL' )
 		if imap_response[0] != 'OK':
 			print "Could not locate chat logs for some reason. Perhaps all "+\
 						"your chats are not logged?"
@@ -59,10 +59,10 @@ class Indexer():
 		for msgID in msgIDs:			
 			print "Retrieved message " + msgID + "/" + str(len(msgIDs))
 			#Retrieves entire message. 
-			rtrv_msg = self.mailbox.fetch( msgID, '(RFC822)' )
+			rtrv_msg = mailbox.fetch( msgID, '(RFC822)' )
 			#Parse message.
 			#parsed_msg = self.msg_parser.parsestr( rtrv_msg[1][0][1] )
-			self.raw_chats.insert( {"id" : msgID, "log" : rtrv_msg} )
+			self.raw_chats.update( {"id" : msgID, "log" : rtrv_msg}, True )
 
 			#info = get_info( parsed_msg )
 			#db_insert( info )

@@ -15,6 +15,7 @@
 
 import imaplib, getpass
 import email.parser
+import pymongo
 
 #TODO 
 #1) Build parser for output of email.parser. Need to use jabber.py and stuff.
@@ -27,10 +28,14 @@ class Indexer():
 		#way to do so.
 		username =	raw_input("User name : ")
 		password = getpass.getpass("Password : ")
+		self.email_id = username + "@gmail.com"
 
 		self.mailbox = imaplib.IMAP4_SSL('imap.gmail.com', 993)
 		self.mailbox.login( username, password )
 		self.msg_parser = email.parser.Parser()
+		self.db_conn = pymongo.Connection()
+		self.chat_db = self.db_conn.temp_chats
+		self.raw_chats = self.chat_db.raw_data
 
 	#Get list of message IDs corresponding to chat logs. This requires set up of
 	#Gmail to allow IMAP access to these logs.
@@ -56,7 +61,8 @@ class Indexer():
 			#Retrieves entire message. 
 			rtrv_msg = self.mailbox.fetch( msgID, '(RFC822)' )
 			#Parse message.
-			parsed_msg = self.msg_parser.parsestr( rtrv_msg[1][0][1] )
+			#parsed_msg = self.msg_parser.parsestr( rtrv_msg[1][0][1] )
+			self.raw_chats.insert( {"id" : msgID, "log" : rtrv_msg} )
 
 			#info = get_info( parsed_msg )
 			#db_insert( info )
